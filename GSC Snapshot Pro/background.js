@@ -3,6 +3,7 @@ const GSC_ORIGIN = 'https://search.google.com';
 const SEARCH_CONSOLE_HOME_URL = `${GSC_ORIGIN}/search-console`;
 const ROUTE_TIMEOUT_MS = 30000;
 const REPORT_SETTLE_DELAY_MS = 2200;
+const SEARCH_CONSOLE_HOME_SETTLE_DELAY_MS = 350;
 const MAX_REPORT_ATTEMPTS = 1;
 const SNAPSHOT_DB_NAME = 'gscSnapshotProDatabase';
 const SNAPSHOT_STORE_NAME = 'snapshots';
@@ -351,8 +352,11 @@ async function discoverPropertiesForTab(tab) {
         return bareDomainMatch ? `sc-domain:${bareDomainMatch[1].toLowerCase()}` : null;
       };
       const scan = (root = document) => {
-        root.querySelectorAll('[data-resource-id]').forEach((element) => {
-          add(element.getAttribute('data-resource-id'), element.getAttribute('aria-label') || element.textContent);
+        root.querySelectorAll('[data-resource-id], [data-resourceid]').forEach((element) => {
+          add(
+            element.getAttribute('data-resourceid') || element.getAttribute('data-resource-id'),
+            element.getAttribute('aria-label') || element.textContent
+          );
         });
         root.querySelectorAll('a[href*="resource_id="], [data-href*="resource_id="]').forEach((element) => {
           const resourceId = resourceFromUrl(element.href || element.getAttribute('data-href'));
@@ -372,12 +376,19 @@ async function discoverPropertiesForTab(tab) {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
       };
-      const propertyMenuRoots = () => [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"], [aria-modal="true"]')]
-        .filter(isVisible)
-        .filter((element) => {
-          const rect = element.getBoundingClientRect();
-          return rect.width > 120 && rect.height > 40 && rect.top < window.innerHeight;
-        });
+      const propertyMenuRoots = () => {
+        // This is the real GSC picker: #resource-selector-container > [role=listbox]
+        // whose selectable rows expose data-resourceid (without a hyphen).
+        const directLists = [...document.querySelectorAll('#resource-selector-container [role="listbox"]')]
+          .filter(isVisible);
+        if (directLists.length) return directLists;
+        return [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"], [aria-modal="true"]')]
+          .filter(isVisible)
+          .filter((element) => {
+            const rect = element.getBoundingClientRect();
+            return rect.width > 120 && rect.height > 40 && rect.top < window.innerHeight;
+          });
+      };
       const displayCurrent = currentResourceId
         ? decodeURIComponent(currentResourceId).replace(/^sc-domain:/, '').toLowerCase()
         : '';
@@ -403,15 +414,20 @@ async function discoverPropertiesForTab(tab) {
       let menuWasOpened = false;
       let openedMenuRoots = [];
       if (propertyControl) {
-        propertyControl.click();
-        menuWasOpened = true;
-        // The list is rendered asynchronously and can be virtualized. Waiting a little
-        // longer here prevents us from reading only the currently selected Property.
-        await pause(1400);
-        openedMenuRoots = propertyMenuRoots();
-        // Read only the freshly opened picker. Scanning the whole page would accidentally
-        // rediscover Search Console's remembered/current Property as the sole account site.
-        openedMenuRoots.forEach((menuRoot) => scan(menuRoot));
+        const pickerWasAlreadyOpen = propertyControl.getAttribute('aria-expanded') === 'true' || propertyMenuRoots().length > 0;
+        if (!pickerWasAlreadyOpen) {
+          propertyControl.click();
+          menuWasOpened = true;
+        }
+        // Poll only until the real picker rows appear. On a warm GSC page this resolves
+        // almost immediately, instead of pausing for a fixed multi-second delay.
+        const pickerDeadline = Date.now() + 4000;
+        while (Date.now() < pickerDeadline) {
+          openedMenuRoots = propertyMenuRoots();
+          openedMenuRoots.forEach((menuRoot) => scan(menuRoot));
+          if (items.size) break;
+          await pause(100);
+        }
       }
 
       // GSC virtualizes long property lists. Scrolling the selector menu progressively
@@ -425,7 +441,8 @@ async function discoverPropertiesForTab(tab) {
           const roleBonus = /listbox|menu|dialog/.test(element.getAttribute('role') || '') ? 1000 : 0;
           const sideBonus = rect.left < 520 ? 100 : 0;
           const resourcesInside = new Set([
-            ...[...element.querySelectorAll('[data-resource-id]')].map((node) => node.getAttribute('data-resource-id')),
+            ...[...element.querySelectorAll('[data-resource-id], [data-resourceid]')]
+              .map((node) => node.getAttribute('data-resourceid') || node.getAttribute('data-resource-id')),
             ...[...element.querySelectorAll('a[href*="resource_id="], [data-href*="resource_id="]')]
               .map((node) => resourceFromUrl(node.href || node.getAttribute('data-href'))),
             ...[...element.querySelectorAll('[role="menuitem"], [role="option"], [role="treeitem"]')]
@@ -438,8 +455,13 @@ async function discoverPropertiesForTab(tab) {
         })
         .sort((first, second) => second.score - first.score);
       const scrollRoot = scrollRoots[0]?.element;
+      const expectedPickerRows = Math.max(0, ...openedMenuRoots.map((menuRoot) => Number(menuRoot.getAttribute('data-childcount')) || 0));
+      // GSC counts its final "Add property" row in data-childcount, so the actual
+      // resource count is normally one lower. Avoid needless scrolling when all rows
+      // are already rendered (as is typical for the account picker).
+      const pickerAlreadyFullyRead = expectedPickerRows > 0 && items.size >= expectedPickerRows - 1;
 
-      if (scrollRoot) {
+      if (scrollRoot && !pickerAlreadyFullyRead) {
         scrollRoot.scrollTop = 0;
         await pause(180);
         let stalledSteps = 0;
@@ -581,7 +603,9 @@ async function navigateToSearchConsoleHome(tabId, runId) {
     try {
       const tab = await chrome.tabs.get(tabId);
       if (isGscUrl(tab.url)) {
-        await sleepWithCancellation(runId, REPORT_SETTLE_DELAY_MS);
+        // The selector waiter below already polls the rendered UI. A short settle keeps
+        // startup responsive without racing GSC's initial navigation.
+        await sleepWithCancellation(runId, SEARCH_CONSOLE_HOME_SETTLE_DELAY_MS);
         await waitForPropertySelector(tabId, runId);
         return chrome.tabs.get(tabId);
       }
