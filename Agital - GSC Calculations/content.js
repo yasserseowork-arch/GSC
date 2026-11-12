@@ -1,314 +1,236 @@
 (() => {
-    /*******************************************************
-     * 0) Helpers for sending messages to popup.js
-     *******************************************************/
-    function sendErrorMessage(message) {
-        chrome.runtime.sendMessage({
-            type: 'PERCENTAGE_CHANGE_ERROR',
-            message: message,
-        });
+  // This file is injected both by the manual Agital button and by the auto reporter.
+  // Guarding it prevents duplicate listeners when a user clicks the manual button twice.
+  if (window.__agitalGscReporterLoaded) return;
+  window.__agitalGscReporterLoaded = true;
+
+  const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const isVisible = (element) => Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
+
+  function parseLocalizedNumber(value) {
+    if (value === null || value === undefined) return Number.NaN;
+    let text = String(value).trim()
+      .replace(/[\u00A0\u202F]/g, ' ')
+      .replace(/[٠-٩]/g, (digit) => '٠١٢٣٤٥٦٧٨٩'.indexOf(digit))
+      .replace(/[۰-۹]/g, (digit) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(digit))
+      .replace(/[%٪]/g, '')
+      .replace(/−/g, '-');
+
+    const suffixMatch = text.match(/\s*([KMB])$/i);
+    const multiplier = suffixMatch
+      ? ({ K: 1e3, M: 1e6, B: 1e9 }[suffixMatch[1].toUpperCase()])
+      : 1;
+    text = text.replace(/\s*[KMB]$/i, '').replace(/\s/g, '');
+
+    if (text.includes(',') && text.includes('.')) {
+      // The separator appearing last is almost always the decimal separator.
+      text = text.lastIndexOf(',') > text.lastIndexOf('.')
+        ? text.replace(/\./g, '').replace(',', '.')
+        : text.replace(/,/g, '');
+    } else if (text.includes(',')) {
+      const pieces = text.split(',');
+      text = pieces.length > 2 || (pieces[1]?.length === 3 && pieces[0].length <= 3)
+        ? text.replace(/,/g, '')
+        : text.replace(',', '.');
     }
 
-    function sendSuccessMessage(message) {
-        chrome.runtime.sendMessage({
-            type: 'PERCENTAGE_CHANGE_SUCCESS',
-            message: message,
-        });
+    const result = Number.parseFloat(text);
+    return Number.isFinite(result) ? result * multiplier : Number.NaN;
+  }
+
+  function metricValueNodes(label) {
+    const selector = `[data-label="${label}"] .nnLLaf`;
+    return [...document.querySelectorAll(selector)].filter(isVisible);
+  }
+
+  function rawMetricValue(node) {
+    return node.getAttribute('title')
+      || node.getAttribute('data-numeric-value')
+      || node.textContent?.trim()
+      || '';
+  }
+
+  function getMetric(label) {
+    const nodes = metricValueNodes(label);
+    const values = nodes
+      .map((node) => parseLocalizedNumber(rawMetricValue(node)))
+      .filter((value) => Number.isFinite(value));
+
+    if (values.length < 2) return null;
+    // Search Console renders the selected period first, followed by the previous period.
+    const [current, previous] = values;
+    return {
+      current,
+      previous,
+      change: previous === 0 ? null : ((current - previous) / previous) * 100,
+      difference: current - previous
+    };
+  }
+
+  function hasComparisonData(reportType) {
+    const required = reportType === 'generative-ai' ? 'IMPRESSIONS' : 'CLICKS';
+    return Boolean(getMetric(required));
+  }
+
+  async function waitForComparisonData(reportType, timeout = 45000) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeout) {
+      if (hasComparisonData(reportType)) return true;
+      await sleep(500);
     }
+    return false;
+  }
 
-    /*******************************************************
-     * 1) Date-check helpers
-     *******************************************************/
-    function parseDate(dateString) {
-        const [month, day, year] = dateString.split('/').map(Number);
-        const fullYear = year < 100 ? 2000 + year : year;
-        return new Date(fullYear, month - 1, day);
-    }
+  function metricLabelText(metric) {
+    if (metric.kind === 'position') return metric.data.difference.toFixed(2);
+    if (metric.data.change === null) return '—';
+    return `${metric.data.change.toFixed(2)}%`;
+  }
 
-    function isValidDate(text) {
-        const dateRegex = /^(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\/(\d{2}|\d{4})$/;
-        return dateRegex.test(text);
-    }
+  function metricIsPositive(metric) {
+    if (metric.kind === 'position') return metric.data.difference < 0;
+    return metric.data.change !== null && metric.data.change >= 0;
+  }
 
-    function graphHasSingleDateOnXAxis() {
-        const graphContainers = document.querySelectorAll('div.rZqBPb');
-        if (!graphContainers.length) {
-            console.log('No rZqBPb containers found, skipping date check.');
-            return false;
-        }
+  function addMetricChange(label, kind = 'percentage') {
+    const data = getMetric(label);
+    if (!data) return null;
 
-        const latestGraphContainer = graphContainers[graphContainers.length - 1];
-        const dateGroup = latestGraphContainer.querySelector('g.PvhD9.kqOKYb');
-        if (!dateGroup) {
-            console.log('No dateGroup found, so no single-date axis detected.');
-            return false;
-        }
+    const cards = [...document.querySelectorAll(`[data-label="${label}"]`)].filter(isVisible);
+    const card = cards[cards.length - 1];
+    if (!card) return data;
 
-        const dateElements = dateGroup.querySelectorAll('g.K2kob');
-        let foundAtLeastOneDate = false;
-        dateElements.forEach((element) => {
-            const dateTextElement = element.querySelector('text.V67aGc tspan');
-            const dateText = dateTextElement?.textContent.trim();
-            const transform = element.getAttribute('transform');
-            if (dateText && transform && isValidDate(dateText)) {
-                foundAtLeastOneDate = true;
-            }
-        });
-        return foundAtLeastOneDate;
-    }
+    card.querySelectorAll(`.agital-percentage-change[data-agital-label="${label}"]`).forEach((element) => element.remove());
+    const metric = { data, kind };
+    const percentageElement = document.createElement('div');
+    percentageElement.className = 'agital-percentage-change';
+    percentageElement.dataset.agitalLabel = label;
+    percentageElement.style.cssText = 'font-size:15px;font-weight:bold;margin-top:10px;color:inherit;line-height:1.25;';
 
-    /*******************************************************
-     * 2) Percentage change logic
-     *******************************************************/
-    function parseLocalizedNumber(input) {
-        let normalized;
-        input = input.replace(/\u00A0/g, ' ');
+    const prefix = document.createElement('span');
+    prefix.textContent = 'Change: ';
+    const value = document.createElement('span');
+    value.textContent = metricLabelText(metric);
+    value.style.cssText = `border:2px solid ${metricIsPositive(metric) ? 'green' : 'red'};padding:2px;margin-inline-start:5px;`;
+    percentageElement.append(prefix, value);
 
-        if (input.includes(',') && input.includes('.')) {
-            if (input.indexOf(',') > input.indexOf('.')) {
-                console.log(`Detected European format with both comma and period: ${input}`);
-                normalized = input.replace(/\./g, '').replace(/,/g, '.');
-            } else {
-                console.log(`Detected US format with both comma and period: ${input}`);
-                normalized = input.replace(/,/g, '');
-            }
-        } else if (input.includes(',') && input.includes(' ')) {
-            console.log(`Detected European format with space as thousands separator and comma as decimal: ${input}`);
-            normalized = input.replace(/\s/g, '').replace(/,/g, '.');
-        } else if (input.includes(' ') && !input.includes(',')) {
-            console.log(`Detected format with space as thousands separator: ${input}`);
-            normalized = input.replace(/\s/g, '');
-        } else if (input.includes(',')) {
-            const commaIndex = input.lastIndexOf(',');
-            if (input.length - commaIndex === 4 && !input.includes('.')) {
-                console.log(`Detected US format with comma as thousands separator: ${input}`);
-                normalized = input.replace(/,/g, '');
-            } else {
-                console.log(`Detected European format with comma as decimal separator: ${input}`);
-                normalized = input.replace(/,/g, '.');
-            }
-        } else if (input.includes('.')) {
-            const periodIndex = input.lastIndexOf('.');
-            if (input.length - periodIndex === 3 || input.length - periodIndex === 2) {
-                console.log(`Detected format with period as decimal separator: ${input}`);
-                normalized = input;
-            } else {
-                console.log(`Detected format with period as thousands separator: ${input}`);
-                normalized = input.replace(/\./g, '');
-            }
-        } else {
-            console.log(`Detected plain number format: ${input}`);
-            normalized = input;
-        }
-        return parseFloat(normalized);
-    }
+    const mount = card.querySelector('.m10vVd') || card.querySelector('.nnLLaf')?.parentElement || card;
+    mount.appendChild(percentageElement);
+    return data;
+  }
 
-    function extractData(label) {
-        console.log(`Extracting data for ${label}`);
-        const elements = Array.from(document.querySelectorAll(`[data-label="${label}"] .nnLLaf`))
-            .filter(el => el.offsetParent !== null);
-        if (elements.length < 2) {
-            console.log(`Not enough data points found for ${label} — skipping calculations.`);
-            return { current: 0, previous: 0 };
-        }
-        const current = parseLocalizedNumber(elements[0].getAttribute('title'));
-        const previous = parseLocalizedNumber(elements[1].getAttribute('title'));
-        console.log(`${label} - Current: ${current}, Previous: ${previous}`);
-        return { current, previous };
-    }
-
-    function calculatePercentageChange(previous, current) {
-        if (previous === 0) {
-            console.log('Previous value is 0, cannot calculate percentage change. Returning 0.');
-            return 0;
-        }
-        return ((current - previous) / previous) * 100;
-    }
-
-    function calculateDifference(previous, current) {
-        return current - previous;
-    }
-
-    function addPercentageChange() {
-        console.log('Adding percentage changes...');
-        const clicksData = extractData('CLICKS');
-        const impressionsData = extractData('IMPRESSIONS');
-        const ctrData = extractData('CTR');
-        const positionData = extractData('POSITION');
-
-        const percentageChanges = {
-            clicks: calculatePercentageChange(clicksData.previous, clicksData.current).toFixed(2),
-            impressions: calculatePercentageChange(impressionsData.previous, impressionsData.current).toFixed(2),
-            ctr: calculatePercentageChange(ctrData.previous, ctrData.current).toFixed(2),
-            position: calculateDifference(positionData.previous, positionData.current).toFixed(2)
-        };
-
-        console.log('Percentage Changes:', percentageChanges);
-
-        const metrics = [
-            { label: 'CLICKS', change: percentageChanges.clicks, isPercentage: true },
-            { label: 'IMPRESSIONS', change: percentageChanges.impressions, isPercentage: true },
-            { label: 'CTR', change: percentageChanges.ctr, isPercentage: true },
-            { label: 'POSITION', change: percentageChanges.position, isPercentage: false }
+  function addRowPercentageChanges() {
+    document.querySelectorAll('table.i3WFpf').forEach((table) => {
+      table.querySelectorAll('tbody tr').forEach((row) => {
+        const cells = row.querySelectorAll('td');
+        const columnPairs = [
+          { previous: 2, current: 1, target: 3 },
+          { previous: 5, current: 4, target: 6 },
+          { previous: 8, current: 7, target: 9 }
         ];
 
-        metrics.forEach(metric => {
-            const metricElements = Array.from(document.querySelectorAll(`[data-label="${metric.label}"] .m10vVd`))
-                .filter(el => el.offsetParent !== null);
-            if (metricElements.length > 1) {
-                console.log(`Adding change info for ${metric.label}`);
-                const latestMetricElement = metricElements[metricElements.length - 1];
-                const percentageElement = document.createElement('div');
-                percentageElement.classList.add('percentage-change');
-                percentageElement.style.fontSize = '15px';
-                percentageElement.style.fontWeight = 'bold';
-                percentageElement.style.marginTop = '10px';
-                percentageElement.style.color = 'inherit';
+        columnPairs.forEach(({ previous, current, target }) => {
+          const previousValue = Number.parseFloat(cells[previous]?.getAttribute('data-numeric-value'));
+          const currentValue = Number.parseFloat(cells[current]?.getAttribute('data-numeric-value'));
+          const targetCell = cells[target];
+          if (!targetCell || !Number.isFinite(previousValue) || !Number.isFinite(currentValue)) return;
 
-                const changeText = document.createElement('span');
-                changeText.textContent = 'Change: ';
-
-                const changeValue = document.createElement('span');
-                changeValue.textContent = metric.change + (metric.isPercentage ? '%' : '');
-                changeValue.style.border = '2px solid';
-                changeValue.style.borderColor = (metric.label === 'POSITION')
-                    ? (parseFloat(metric.change) < 0 ? 'green' : 'red')
-                    : (metric.change.startsWith('-') ? 'red' : 'green');
-                changeValue.style.padding = '2px';
-                changeValue.style.marginLeft = '5px';
-
-                percentageElement.appendChild(changeText);
-                percentageElement.appendChild(changeValue);
-
-                const existingElement = latestMetricElement.querySelector('.percentage-change');
-                if (existingElement) {
-                    existingElement.remove();
-                }
-                latestMetricElement.appendChild(percentageElement);
-            } else {
-                console.log(`Not enough metric elements found for ${metric.label} — skipping that metric's calculation.`);
-            }
+          targetCell.querySelectorAll('.agital-row-percentage-change').forEach((element) => element.remove());
+          const percentage = previousValue === 0 ? null : ((currentValue - previousValue) / previousValue) * 100;
+          const badge = document.createElement('div');
+          badge.className = 'agital-row-percentage-change';
+          badge.textContent = `(${percentage === null ? '—' : `${percentage.toFixed(2)}%`})`;
+          badge.style.cssText = `display:inline-block;border:1px solid ${percentage !== null && percentage >= 0 ? 'green' : 'red'};padding:2px 4px;margin-top:5px;border-radius:3px;`;
+          targetCell.appendChild(badge);
         });
+      });
+    });
+  }
+
+  function collectMetrics() {
+    const clicks = getMetric('CLICKS');
+    const impressions = getMetric('IMPRESSIONS');
+    const ctr = getMetric('CTR');
+    const position = getMetric('POSITION');
+    return { clicks, impressions, ctr, position };
+  }
+
+  async function runCalculations({ reportType = 'performance', waitForData = false } = {}) {
+    const available = waitForData ? await waitForComparisonData(reportType) : hasComparisonData(reportType);
+    if (!available) {
+      return {
+        ok: false,
+        error: 'Comparison data was not found. Select Compare → Last 7 days vs previous period, then try again.'
+      };
     }
 
-    function addPercentageChangeToRows() {
-        console.log('Adding percentage changes to table rows...');
+    const metrics = collectMetrics();
+    addMetricChange('CLICKS');
+    addMetricChange('IMPRESSIONS');
+    addMetricChange('CTR');
+    addMetricChange('POSITION', 'position');
+    addRowPercentageChanges();
+    return { ok: true, metrics };
+  }
 
-        const tables = document.querySelectorAll('table.i3WFpf');
-        if (tables.length === 0) {
-            console.log('No tables found with the class i3WFpf. Skipping row-based changes.');
-            return;
-        }
+  function findReportRoot(reportType) {
+    const labels = reportType === 'generative-ai' ? ['IMPRESSIONS'] : ['CLICKS', 'IMPRESSIONS'];
+    const roots = [...document.querySelectorAll('div.rZqBPb')].filter((root) => {
+      if (!isVisible(root) || !root.querySelector('svg')) return false;
+      return labels.some((label) => root.querySelector(`[data-label="${label}"]`));
+    });
+    if (roots.length) return roots[roots.length - 1];
 
-        tables.forEach((table, tableIndex) => {
-            console.log(`Processing table ${tableIndex + 1} of ${tables.length}`);
-            const rows = table.querySelectorAll('tbody tr');
-            if (rows.length === 0) {
-                console.log(`No rows found in table ${tableIndex + 1}. Skipping...`);
-                return;
-            }
+    const anchor = labels
+      .map((label) => [...document.querySelectorAll(`[data-label="${label}"]`)].find(isVisible))
+      .find(Boolean);
+    if (!anchor) return null;
 
-            rows.forEach((row, rowIndex) => {
-                const cells = row.querySelectorAll('td');
-                const columnPairs = [
-                    { oldIndex: 2, newIndex: 1, diffIndex: 3 },  // Clicks
-                    { oldIndex: 5, newIndex: 4, diffIndex: 6 },  // Impressions
-                    { oldIndex: 8, newIndex: 7, diffIndex: 9 }   // CTR
-                ];
-
-                columnPairs.forEach(({ oldIndex, newIndex, diffIndex }) => {
-                    const oldValueCell = cells[oldIndex];
-                    const newValueCell = cells[newIndex];
-                    const differenceCell = cells[diffIndex];
-
-                    if (oldValueCell && newValueCell && differenceCell) {
-                        const oldValueAttr = oldValueCell.getAttribute('data-numeric-value');
-                        const newValueAttr = newValueCell.getAttribute('data-numeric-value');
-
-                        if (oldValueAttr === null || newValueAttr === null) {
-                            console.log(`Row ${rowIndex + 1}: Missing data-numeric-value. Skipping this row for ${oldIndex}, ${newIndex}, ${diffIndex}.`);
-                            return;
-                        }
-
-                        const oldValue = parseFloat(oldValueAttr);
-                        const newValue = parseFloat(newValueAttr);
-
-                        if (isNaN(oldValue) || isNaN(newValue)) {
-                            console.log(`Row ${rowIndex + 1}: Invalid numeric values. Skipping...`);
-                            return;
-                        }
-
-                        const percentageChange = calculatePercentageChange(oldValue, newValue).toFixed(2);
-
-                        const existingPercentageDiv = differenceCell.querySelector('.percentage-change');
-                        if (existingPercentageDiv) {
-                            existingPercentageDiv.remove();
-                        }
-
-                        const percentageDiv = document.createElement('div');
-                        percentageDiv.textContent = `(${percentageChange}%)`;
-                        percentageDiv.classList.add('percentage-change');
-
-                        percentageDiv.style.border = '1px solid';
-                        percentageDiv.style.padding = '2px 4px';
-                        percentageDiv.style.marginTop = '5px';
-                        percentageDiv.style.borderRadius = '3px';
-
-                        const differenceSpan = differenceCell.querySelector('span');
-                        percentageDiv.style.color = differenceSpan ? differenceSpan.style.color : 'inherit';
-
-                        if (parseFloat(percentageChange) > 0) {
-                            percentageDiv.style.borderColor = 'green';
-                        } else {
-                            percentageDiv.style.borderColor = 'red';
-                        }
-
-                        if (differenceSpan) {
-                            differenceSpan.appendChild(percentageDiv);
-                        } else {
-                            differenceCell.appendChild(percentageDiv);
-                        }
-                    } else {
-                        console.log(
-                            `Row ${rowIndex + 1}: Missing cells for indices ${oldIndex}, ${newIndex}, ${diffIndex}. Skipping this chunk.`
-                        );
-                    }
-                });
-            });
-
-            console.log(`Finished row-based changes for table ${tableIndex + 1}.`);
-        });
+    let candidate = anchor;
+    for (let index = 0; candidate?.parentElement && index < 8; index += 1) {
+      candidate = candidate.parentElement;
+      const rect = candidate.getBoundingClientRect();
+      if (candidate.querySelector('svg') && rect.width > 450 && rect.height > 250) return candidate;
     }
+    return anchor.parentElement;
+  }
 
-    /*******************************************************
-     * Remove the observer logic; we only rely on checkForChanges()
-     *******************************************************/
-    function checkForChanges() {
-        console.log('Checking for changes...');
+  async function prepareCapture({ reportType = 'performance' } = {}) {
+    const root = findReportRoot(reportType);
+    if (!root) return { ok: false, error: 'The Search Console report card was not found.' };
 
-        if (graphHasSingleDateOnXAxis()) {
-            console.log('Date-based view detected. Skipping percentage changes...');
-            sendErrorMessage('Percentage Change Can Only Be Applied in Comparison Views');
-            return;
-        }
-        addPercentageChange();
-        addPercentageChangeToRows();
+    root.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' });
+    await sleep(650);
+    const rect = root.getBoundingClientRect();
+    const padding = 10;
+    const left = Math.max(0, rect.left - padding);
+    const top = Math.max(0, rect.top - padding);
+    const width = Math.min(window.innerWidth - left, rect.width + padding * 2);
+    const height = Math.min(window.innerHeight - top - padding, rect.height + padding * 2);
+    if (width < 50 || height < 50) return { ok: false, error: 'The report card is outside the visible area.' };
 
-        sendSuccessMessage('Percentage changes were applied successfully.');
+    return {
+      ok: true,
+      crop: {
+        x: left,
+        y: top,
+        width,
+        height,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight
+      }
+    };
+  }
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === 'AGITAL_RUN_CALCULATIONS') {
+      runCalculations(message).then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
     }
-
-    // Initialize the script
-    function init() {
-        console.log('Initializing script...');
-        // We just call checkForChanges once
-        checkForChanges();
+    if (message?.type === 'AGITAL_PREPARE_CAPTURE') {
+      prepareCapture(message).then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
     }
-
-    // Optional: if you have a refresh button, you can still attach it
-    const refreshButton = document.getElementById('refresh-stats');
-    if (refreshButton) {
-        refreshButton.addEventListener('click', checkForChanges);
-    }
-
-    init();
+    return undefined;
+  });
 })();

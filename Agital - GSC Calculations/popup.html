@@ -1,29 +1,68 @@
 <!doctype html>
-<html>
+<html lang="ar" dir="rtl">
 <head>
-    <title>Agital - GSC</title>
-    <!-- Link to the CSS file -->
-    <link rel="stylesheet" type="text/css" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agital GSC Auto Reporter</title>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <img src="logo.png" alt="Logo"> <!-- Replace with your logo file -->
-            <span>Agital - GSC Calculations</span>
-        </div>
-        <div class="button-container">
-            <button id="run-script">Calculate Percentage Change</button>
-            <button id="show-algo-updates">Add Algorithm Updates</button>
-        </div>
-        <p id="news">
-            <a href="https://agital.com/seo-consultation-chris-long/?utm_campaign=5765215-GSC_Update_GF&utm_source=cl_cons_popup&utm_medium=cl_cons_popup"
-               target="_blank" rel="noopener noreferrer">
-               Learn How Agital Uses GSC Data To Drive SEO Strategy
-            </a>
-        </p>
-        <!-- **Status Message Area** -->
-        <p id="status"></p>
-    </div>
-    <script src="popup.js"></script>
+  <main class="container">
+    <header class="header">
+      <img src="logo.png" alt="Agital">
+      <div>
+        <h1>Agital GSC Auto Reporter</h1>
+        <p>مقارنة أسبوع بأسبوع + لقطات جاهزة للتقرير</p>
+      </div>
+    </header>
+
+    <section class="current-property" aria-live="polite">
+      <span class="eyebrow">الموقع المفتوح الآن في Search Console</span>
+      <strong id="current-property">جارٍ التحقق…</strong>
+    </section>
+
+    <section class="settings" aria-label="إعدادات التقرير">
+      <label for="properties">المواقع المطلوب تشغيلها</label>
+      <textarea id="properties" rows="4" spellcheck="false" placeholder="اترك الحقل فارغًا للموقع المفتوح الآن&#10;أو أضف موقعًا في كل سطر، مثل:&#10;sc-domain:example.com&#10;https://www.example.com/"></textarea>
+      <div class="field-hint">يتم تشغيل المواقع بالترتيب. يمكن استيراد المواقع المتاحة من قائمة الخصائص في GSC، أو كتابة القائمة يدويًا.</div>
+      <button id="discover-properties" class="secondary compact" type="button">استيراد المواقع من قائمة الخصائص</button>
+
+      <label class="check-row">
+        <input id="skip-declines" type="checkbox" checked>
+        <span>تخطي الموقع إذا كانت النقرات أقل من الأسبوع السابق</span>
+      </label>
+      <label class="check-row">
+        <input id="include-generative" type="checkbox" checked>
+        <span>التقاط تقرير <bdi>Generative AI features</bdi> أيضًا</span>
+      </label>
+    </section>
+
+    <button id="start-run" class="primary" type="button">بدء التقرير التلقائي</button>
+    <button id="cancel-run" class="danger hidden" type="button">إيقاف التشغيل</button>
+
+    <section id="run-panel" class="run-panel" aria-live="polite" hidden>
+      <div class="run-heading">
+        <span id="run-indicator" class="indicator"></span>
+        <strong id="run-status">في الانتظار</strong>
+      </div>
+      <p id="run-detail" class="run-detail"></p>
+      <ol id="run-records" class="run-records"></ol>
+    </section>
+
+    <details class="manual-tools">
+      <summary>أدوات Agital اليدوية</summary>
+      <p>استخدمها على صفحة GSC المفتوحة إذا أردت تطبيق الحسابات أو علامات تحديثات الخوارزمية بنفسك.</p>
+      <div class="manual-buttons">
+        <button id="run-script" class="purple" type="button">Calculate Percentage Change</button>
+        <button id="show-algo-updates" class="green" type="button">Add Algorithm Updates</button>
+      </div>
+      <p id="manual-status" class="manual-status"></p>
+    </details>
+
+    <footer>
+      تُحفظ الصور تلقائيًا في مجلد التنزيلات باسم الموقع ضمن <code>GSC week over week</code>.
+    </footer>
+  </main>
+  <script src="popup.js"></script>
 </body>
 </html>
