@@ -306,9 +306,20 @@ async function discoverPropertiesForTab(tab) {
       const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
       const items = new Map();
       const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+      const normalizeDiscoveredResource = (value) => {
+        const resourceId = decodeURIComponent(String(value || '').trim());
+        if (/^sc-domain:[a-z0-9.-]+$/i.test(resourceId)) return resourceId;
+        try {
+          const url = new URL(resourceId);
+          return url.protocol === 'http:' || url.protocol === 'https:' ? `${url.origin}/` : null;
+        } catch {
+          return null;
+        }
+      };
       const add = (resourceId, label) => {
-        if (!resourceId || items.has(resourceId)) return;
-        items.set(resourceId, { resourceId, label: cleanText(label) || resourceId });
+        const normalizedResourceId = normalizeDiscoveredResource(resourceId);
+        if (!normalizedResourceId || items.has(normalizedResourceId)) return;
+        items.set(normalizedResourceId, { resourceId: normalizedResourceId, label: cleanText(label) || normalizedResourceId });
       };
       const resourceFromUrl = (value) => {
         try {
@@ -322,13 +333,19 @@ async function discoverPropertiesForTab(tab) {
         const domainMatch = text.match(/\bsc-domain:[a-z0-9.-]+/i);
         if (domainMatch) return domainMatch[0];
         const urlMatch = text.match(/https?:\/\/[^\s<>"']+/i);
-        if (!urlMatch) return null;
-        try {
-          const url = new URL(urlMatch[0]);
-          return `${url.origin}/`;
-        } catch {
-          return null;
+        if (urlMatch) {
+          try {
+            const url = new URL(urlMatch[0]);
+            return `${url.origin}/`;
+          } catch {
+            return null;
+          }
         }
+        // GSC's Property picker commonly renders a Domain Property as only
+        // "example.com" (without the internal sc-domain: prefix). These are
+        // actual selectable properties, not ordinary page links.
+        const bareDomainMatch = text.match(/(?:^|\s)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)(?=\s|$)/i);
+        return bareDomainMatch ? `sc-domain:${bareDomainMatch[1].toLowerCase()}` : null;
       };
       const scan = (root = document) => {
         root.querySelectorAll('[data-resource-id]').forEach((element) => {
@@ -341,15 +358,23 @@ async function discoverPropertiesForTab(tab) {
         // Some GSC releases expose the property only as the text in a menu item.
         // Read those entries as well instead of assuming every item has an href.
         root.querySelectorAll('[role="menuitem"], [role="option"], [role="treeitem"]').forEach((element) => {
+          if (!isVisible(element)) return;
           const label = element.getAttribute('aria-label') || element.textContent;
           const resourceId = resourceFromPropertyText(label);
-          add(resourceId, label);
+          const propertyLabel = resourceId?.replace(/^sc-domain:/i, '') || label;
+          add(resourceId, propertyLabel);
         });
       };
       const isVisible = (element) => {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
       };
+      const propertyMenuRoots = () => [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"], [aria-modal="true"]')]
+        .filter(isVisible)
+        .filter((element) => {
+          const rect = element.getBoundingClientRect();
+          return rect.width > 120 && rect.height > 40 && rect.top < window.innerHeight;
+        });
       const displayCurrent = currentResourceId
         ? decodeURIComponent(currentResourceId).replace(/^sc-domain:/, '').toLowerCase()
         : '';
@@ -373,17 +398,24 @@ async function discoverPropertiesForTab(tab) {
         .sort((first, second) => second.score - first.score)[0]?.element;
 
       let menuWasOpened = false;
+      let openedMenuRoots = [];
       if (propertyControl) {
         propertyControl.click();
         menuWasOpened = true;
-        await pause(800);
-        scan();
+        // The list is rendered asynchronously and can be virtualized. Waiting a little
+        // longer here prevents us from reading only the currently selected Property.
+        await pause(1400);
+        openedMenuRoots = propertyMenuRoots();
+        // Read only the freshly opened picker. Scanning the whole page would accidentally
+        // rediscover Search Console's remembered/current Property as the sole account site.
+        openedMenuRoots.forEach((menuRoot) => scan(menuRoot));
       }
 
       // GSC virtualizes long property lists. Scrolling the selector menu progressively
       // makes every accessible property appear in the DOM so it can be collected.
-      const scrollRoots = [...document.querySelectorAll('[role="listbox"], [role="menu"], [role="dialog"], div')]
+      const scrollRoots = [...document.querySelectorAll('[role="listbox"], [role="menu"], [role="dialog"], [aria-modal="true"], div')]
         .filter(isVisible)
+        .filter((element) => !openedMenuRoots.length || openedMenuRoots.some((menuRoot) => menuRoot === element || menuRoot.contains(element)))
         .filter((element) => element.scrollHeight > element.clientHeight + 12 && element.clientHeight > 90)
         .map((element) => {
           const rect = element.getBoundingClientRect();
@@ -392,9 +424,13 @@ async function discoverPropertiesForTab(tab) {
           const resourcesInside = new Set([
             ...[...element.querySelectorAll('[data-resource-id]')].map((node) => node.getAttribute('data-resource-id')),
             ...[...element.querySelectorAll('a[href*="resource_id="], [data-href*="resource_id="]')]
-              .map((node) => resourceFromUrl(node.href || node.getAttribute('data-href')))
+              .map((node) => resourceFromUrl(node.href || node.getAttribute('data-href'))),
+            ...[...element.querySelectorAll('[role="menuitem"], [role="option"], [role="treeitem"]')]
+              .filter(isVisible)
+              .map((node) => resourceFromPropertyText(node.getAttribute('aria-label') || node.textContent))
           ].filter(Boolean)).size;
-          // A property menu contains several unique resource ids; report content only repeats the current one.
+          // A property menu contains several unique Properties; report content only repeats
+          // the current one. Count text-only Domain Properties as well as href-based ones.
           return { element, score: resourcesInside * 10000 + roleBonus + sideBonus + Math.min(element.clientHeight, 600) };
         })
         .sort((first, second) => second.score - first.score);
@@ -429,21 +465,15 @@ async function discoverPropertiesForTab(tab) {
   found.forEach((property) => {
     if (property?.resourceId) all.set(property.resourceId, {
       resourceId: property.resourceId,
-      label: property.label || displayProperty(property.resourceId)
+      // Use the normalized property name instead of menu/container text. This avoids
+      // bogus labels such as "Google Search Console" becoming a report target.
+      label: displayProperty(property.resourceId)
     });
   });
 
-  // Search Console can redirect its landing page to the last Property that was viewed.
-  // Only use that fallback when the selector yielded nothing and the page is not an
-  // access-denied page. Never insert an inaccessible current URL into an all-sites run.
-  if (!all.size && current) {
-    const [accessCheck] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => !/you don't have access|you do not have access|ليس لديك صلاحية/i.test(document.body?.innerText || '')
-    });
-    if (accessCheck?.result) all.set(current.resourceId, current);
-  }
-
+  // Do not fall back to the URL currently open in Search Console. Google often redirects
+  // its home page to a remembered Property, which is not evidence that it is the first
+  // or an accessible Property in this account.
   return [...all.values()].sort((first, second) => first.label.localeCompare(second.label));
 }
 
