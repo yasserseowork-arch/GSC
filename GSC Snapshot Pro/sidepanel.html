@@ -31,34 +31,20 @@
     </nav>
 
     <section id="run-view" class="view">
-      <section class="current-property" aria-live="polite">
-        <div class="property-icon" aria-hidden="true">⌁</div>
+      <section class="autopilot-card" aria-live="polite">
+        <div class="autopilot-icon" aria-hidden="true">↗</div>
         <div>
-          <span class="eyebrow">الـ Property المفتوح الآن</span>
-          <strong id="current-property">جارٍ التحقق…</strong>
+          <span class="eyebrow">تشغيل تلقائي بالكامل</span>
+          <h2>كل Properties في حسابك</h2>
+          <p>اضغط بدء فقط. الإكستنشن يفتح Search Console، يبدأ من <bdi>sweetensugar.com</bdi>، يستخرج كل المواقع المتاحة، ثم يشغّلها واحدًا واحدًا.</p>
         </div>
       </section>
 
-      <section class="settings" aria-label="إعدادات التقرير">
-        <div class="section-label"><span>01</span> إعدادات التشغيل</div>
-        <label for="properties">المواقع المطلوب تشغيلها</label>
-        <textarea id="properties" rows="5" spellcheck="false" placeholder="اترك الحقل فارغًا للموقع المفتوح الآن&#10;أو أضف موقعًا في كل سطر، مثل:&#10;sc-domain:example.com&#10;https://www.example.com/"></textarea>
-        <div class="field-hint">استخدم الاستيراد لجلب كل الـ Properties المتاحة في حساب Search Console، ثم ستعمل المواقع واحدًا واحدًا بالترتيب.</div>
-        <button id="discover-properties" class="secondary" type="button"><span aria-hidden="true">↓</span> استيراد كل الخصائص من الحساب</button>
-
-        <div class="toggles">
-          <label class="check-row">
-            <input id="skip-declines" type="checkbox" checked>
-            <span class="fake-check"></span>
-            <span><b>فلترة ذكية للنقرات</b><small>تخطي الموقع إذا كانت النقرات أقل من الأسبوع السابق</small></span>
-          </label>
-          <label class="check-row">
-            <input id="include-generative" type="checkbox" checked>
-            <span class="fake-check"></span>
-            <span><bdi><b>Generative AI features</b></bdi><small>حفظ لقطة تقرير الذكاء الاصطناعي عند توفره</small></span>
-          </label>
-        </div>
-      </section>
+      <div class="automation-steps" aria-label="مراحل التشغيل">
+        <div><span>01</span><b>فتح Search Console</b><small>مقارنة آخر 7 أيام تلقائيًا</small></div>
+        <div><span>02</span><b>قراءة كل Properties</b><small>بدون نسخ أو لصق يدوي</small></div>
+        <div><span>03</span><b>حفظ اللقطات</b><small>داخل مكتبة الإكستنشن</small></div>
+      </div>
 
       <button id="start-run" class="primary" type="button"><span class="button-icon" aria-hidden="true">↗</span> بدء التقرير التلقائي</button>
       <button id="cancel-run" class="danger hidden" type="button">إيقاف التشغيل</button>
@@ -70,7 +56,7 @@
       </section>
 
       <p id="run-message" class="run-message" aria-live="polite"></p>
-      <footer><span class="footer-dot"></span>اللقطات تحفظ تلقائيًا داخل الإكستنشن. افتح تبويب <b>مكتبة اللقطات</b> للمعاينة أو التنزيل.</footer>
+      <footer><span class="footer-dot"></span>سيظهر لك تأكيد فوري عند بدء التشغيل، ثم رسالة واضحة عند اكتمال جميع المواقع. اللقطات محفوظة في <b>مكتبة اللقطات</b>.</footer>
     </section>
 
     <section id="library-view" class="view" hidden>

@@ -12,14 +12,6 @@ function setRunMessage(message = '', type = 'error') {
   element.style.color = type === 'success' ? '#6ee7b7' : type === 'info' ? '#93c5fd' : '#fda4af';
 }
 
-function propertyText(property) {
-  return property?.resourceId ? (property.label || property.resourceId) : 'افتح أي موقع داخل Google Search Console أولًا';
-}
-
-function parseProperties(text) {
-  return text.split(/\r?\n|,/).map((line) => line.trim()).filter(Boolean);
-}
-
 function formatMetric(metric) {
   if (!metric || typeof metric.current !== 'number' || typeof metric.previous !== 'number') return '';
   const sign = metric.change > 0 ? '+' : '';
@@ -90,40 +82,6 @@ function stopPolling() {
   pollingTimer = null;
 }
 
-async function activeTab() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab?.id) throw new Error('لم يتم العثور على تبويب نشط.');
-  return tab;
-}
-
-async function loadCurrentProperty() {
-  try {
-    const response = await chrome.runtime.sendMessage({ type: 'GET_CURRENT_PROPERTY' });
-    if (response?.error) throw new Error(response.error);
-    $('#current-property').textContent = propertyText(response?.property);
-  } catch (error) {
-    $('#current-property').textContent = 'تعذر قراءة الموقع المفتوح';
-    setRunMessage(error.message);
-  }
-}
-
-async function discoverProperties() {
-  const button = $('#discover-properties');
-  button.disabled = true;
-  setRunMessage('جارٍ فتح قائمة الخصائص وجمع المواقع من الحساب…', 'info');
-  try {
-    const response = await chrome.runtime.sendMessage({ type: 'DISCOVER_PROPERTIES' });
-    if (response?.error) throw new Error(response.error);
-    if (!response?.properties?.length) throw new Error('لم يتم العثور على Properties. أضف قائمة المواقع يدويًا.');
-    $('#properties').value = response.properties.map((property) => property.resourceId).join('\n');
-    setRunMessage(`تم استيراد ${response.properties.length} Property من الحساب.`, 'success');
-  } catch (error) {
-    setRunMessage(error.message);
-  } finally {
-    button.disabled = false;
-  }
-}
-
 async function startRun() {
   const button = $('#start-run');
   button.disabled = true;
@@ -131,10 +89,11 @@ async function startRun() {
   try {
     const response = await chrome.runtime.sendMessage({
       type: 'START_RUN',
-      rawProperties: parseProperties($('#properties').value),
+      autoDiscover: true,
+      rawProperties: [],
       options: {
-        skipDecliningClicks: $('#skip-declines').checked,
-        includeGenerativeAi: $('#include-generative').checked
+        skipDecliningClicks: true,
+        includeGenerativeAi: true
       }
     });
     if (!response?.started) throw new Error(response?.error || 'تعذر بدء التقرير.');
@@ -311,13 +270,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   domReady = true;
   $('#tab-run').addEventListener('click', () => switchView('run'));
   $('#tab-library').addEventListener('click', () => switchView('library'));
-  $('#discover-properties').addEventListener('click', discoverProperties);
   $('#start-run').addEventListener('click', startRun);
   $('#cancel-run').addEventListener('click', cancelRun);
   $('#export-snapshot').addEventListener('click', safelyRun(exportSelectedSnapshot));
   $('#delete-snapshot').addEventListener('click', safelyRun(deleteSelectedSnapshot));
   $('#clear-library').addEventListener('click', safelyRun(clearLibrary));
-  await Promise.all([loadCurrentProperty(), refreshState(), refreshSnapshotSummary()]);
+  await Promise.all([refreshState(), refreshSnapshotSummary()]);
 });
 
 window.addEventListener('unload', stopPolling);

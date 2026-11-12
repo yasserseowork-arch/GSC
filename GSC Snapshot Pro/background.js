@@ -1,6 +1,7 @@
 const RUN_STORAGE_KEY = 'gscSnapshotProRun';
 const GSC_ORIGIN = 'https://search.google.com';
 const REPORT_ZOOM = 0.8;
+const BOOTSTRAP_RESOURCE_ID = 'sc-domain:sweetensugar.com';
 const ROUTE_TIMEOUT_MS = 30000;
 const REPORT_SETTLE_DELAY_MS = 2200;
 const MAX_REPORT_ATTEMPTS = 1;
@@ -223,8 +224,7 @@ async function getCurrentProperty() {
   return { property, tab };
 }
 
-async function discoverProperties() {
-  const tab = await getActiveTab();
+async function discoverPropertiesForTab(tab) {
   const current = propertyFromUrl(tab.url);
   if (!current) throw new Error('افتح Google Search Console أولًا لاستيراد قائمة الخصائص.');
 
@@ -341,6 +341,10 @@ async function discoverProperties() {
     });
   });
   return [...all.values()].sort((first, second) => first.label.localeCompare(second.label));
+}
+
+async function discoverProperties() {
+  return discoverPropertiesForTab(await getActiveTab());
 }
 
 function isExpectedReportRoute(currentUrl, targetUrl) {
@@ -614,21 +618,96 @@ async function processRun(runId) {
   }
 }
 
+function queuedRecords(properties) {
+  return properties.map((property) => ({
+    ...property,
+    status: 'queued',
+    performance: { status: 'queued' },
+    generativeAi: { status: 'queued' }
+  }));
+}
+
+async function restoreRunZoom(state) {
+  if (!Number.isFinite(state?.originalZoom)) return;
+  try {
+    await chrome.tabs.setZoom(state.tabId, state.originalZoom);
+  } catch {
+    // The bootstrap tab may have been closed before the run could start.
+  }
+}
+
+async function bootstrapAndProcessRun(runId) {
+  let handedToProcessor = false;
+  let state = await getRunState();
+  if (!state || state.id !== runId) return;
+
+  try {
+    await updateRunState(runId, (latest) => {
+      latest.message = 'تم بدء التشغيل. جارٍ فتح Google Search Console واستخراج كل الـ Properties…';
+      latest.records[0].status = 'running';
+      latest.records[0].detail = 'جارٍ فتح تقرير البداية…';
+    });
+    await navigateToReport(state.tabId, reportUrl(BOOTSTRAP_RESOURCE_ID, 'performance'));
+    if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+
+    await updateRunState(runId, (latest) => {
+      latest.records[0].detail = 'جارٍ قراءة كل الـ Properties من حساب Search Console…';
+    });
+    const tab = await chrome.tabs.get(state.tabId);
+    const properties = await discoverPropertiesForTab(tab);
+    if (!properties.length) throw new Error('لم يتم العثور على أي Property في حساب Search Console المفتوح.');
+    if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+
+    await updateRunState(runId, (latest) => {
+      latest.properties = properties;
+      latest.records = queuedRecords(properties);
+      latest.message = `تم استخراج ${properties.length} Property. جارٍ بدء التشغيل التلقائي…`;
+    });
+    handedToProcessor = true;
+    await processRun(runId);
+  } catch (error) {
+    state = await getRunState();
+    if (!state || state.id !== runId) return;
+    await updateRunState(runId, (latest) => {
+      if (error.message === '__CANCELLED__') {
+        latest.status = 'cancelled';
+        latest.message = 'تم إيقاف التشغيل بناءً على طلبك.';
+      } else {
+        latest.status = 'failed';
+        latest.message = error.message || 'تعذر تجهيز تشغيل التقرير.';
+        if (latest.records[0]) {
+          latest.records[0].status = 'error';
+          latest.records[0].error = latest.message;
+          latest.records[0].detail = '';
+        }
+      }
+    });
+  } finally {
+    if (!handedToProcessor) await restoreRunZoom(state);
+  }
+}
+
 async function startRun(message) {
   const existing = await getRunState();
   if (existing?.status === 'running') throw new Error('يوجد تقرير قيد التشغيل بالفعل.');
 
-  const current = await getCurrentProperty();
-  const tab = current.tab;
-  if (!tab?.id || !current.property) throw new Error(current.reason || 'افتح موقعًا داخل Google Search Console أولًا.');
+  let tab = await getActiveTab();
+  // If the side panel was opened away from GSC, protect the current page by creating
+  // a dedicated Search Console tab for the fully automatic run.
+  if (!isGscUrl(tab.url)) {
+    tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  }
 
-  const inputs = message.rawProperties?.length ? message.rawProperties : [current.property.resourceId];
+  const manuallySupplied = message.rawProperties?.length > 0;
   const unique = new Map();
-  inputs.forEach((input) => {
-    const resourceId = normaliseProperty(input);
-    unique.set(resourceId, { resourceId, label: displayProperty(resourceId) });
-  });
-  const properties = [...unique.values()];
+  if (manuallySupplied) {
+    message.rawProperties.forEach((input) => {
+      const resourceId = normaliseProperty(input);
+      unique.set(resourceId, { resourceId, label: displayProperty(resourceId) });
+    });
+  }
+  const bootstrapProperty = { resourceId: BOOTSTRAP_RESOURCE_ID, label: displayProperty(BOOTSTRAP_RESOURCE_ID) };
+  const properties = manuallySupplied ? [...unique.values()] : [bootstrapProperty];
   if (!properties.length) throw new Error('أضف موقعًا واحدًا على الأقل.');
 
   let originalZoom = 1;
@@ -640,6 +719,7 @@ async function startRun(message) {
     // Zoom is only to fit the report card into one capture. The report can still run at the existing zoom.
   }
 
+  const automaticDiscovery = !manuallySupplied && message.autoDiscover !== false;
   const state = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     status: 'running',
@@ -652,37 +732,23 @@ async function startRun(message) {
       skipDecliningClicks: message.options?.skipDecliningClicks !== false,
       includeGenerativeAi: message.options?.includeGenerativeAi !== false
     },
-    records: properties.map((property) => ({
-      ...property,
-      status: 'queued',
-      performance: { status: 'queued' },
-      generativeAi: { status: 'queued' }
-    })),
-    message: 'جارٍ تجهيز التقرير…',
+    records: queuedRecords(properties),
+    message: automaticDiscovery
+      ? 'تم بدء التشغيل. جارٍ فتح Google Search Console تلقائيًا…'
+      : 'جارٍ تجهيز التقرير…',
     cancelRequested: false
   };
   await saveRunState(state);
 
-  // Do not await the long-running flow: the side panel receives an immediate response and can stay open safely.
-  processRun(state.id).catch(async (error) => {
+  // Return immediately so the side panel confirms that the run has started before GSC is opened.
+  const runner = automaticDiscovery ? bootstrapAndProcessRun(state.id) : processRun(state.id);
+  runner.catch(async (error) => {
     await updateRunState(state.id, (latest) => {
       latest.status = 'failed';
       latest.message = error.message || 'تعذر تشغيل التقرير.';
     });
   });
   return { started: true, state };
-}
-
-async function openSnapshotSidePanel(tabId) {
-  if (!chrome.sidePanel) throw new Error('ميزة Side Panel تحتاج إصدار Chrome حديث.');
-  const targetTabId = tabId || (await getActiveTab()).id;
-  await chrome.sidePanel.setOptions({
-    tabId: targetTabId,
-    path: 'sidepanel.html',
-    enabled: true
-  });
-  await chrome.sidePanel.open({ tabId: targetTabId });
-  return { ok: true };
 }
 
 async function exportSnapshot(snapshotId) {
@@ -730,7 +796,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return { count: 0 };
     },
     EXPORT_SNAPSHOT: async () => exportSnapshot(message.snapshotId),
-    OPEN_SNAPSHOT_SIDEBAR: async () => openSnapshotSidePanel(message.tabId),
     START_RUN: () => startRun(message),
     CANCEL_RUN: async () => {
       const state = await getRunState();
