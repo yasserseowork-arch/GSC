@@ -596,6 +596,54 @@ async function navigateToReport(tabId, url, runId) {
   await sleepWithCancellation(runId, REPORT_SETTLE_DELAY_MS);
 }
 
+async function selectPropertyFromPicker(tabId, resourceId, runId) {
+  await throwIfCancelled(runId);
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [resourceId],
+    func: async (wantedResourceId) => {
+      const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+      const normalise = (value) => {
+        try {
+          return decodeURIComponent(String(value || '').trim()).toLowerCase();
+        } catch {
+          return String(value || '').trim().toLowerCase();
+        }
+      };
+      const wanted = normalise(wantedResourceId);
+      const isVisible = (element) => {
+        const rect = element?.getBoundingClientRect();
+        return Boolean(rect?.width && rect?.height && getComputedStyle(element).visibility !== 'hidden');
+      };
+      const control = document.querySelector('#resource-selector-container [role="button"], #resource-selector-container button, #resource-selector-container [aria-haspopup]');
+      if (!control) return { found: false, error: 'لم يظهر محدد الـ Properties.' };
+      if (control.getAttribute('aria-expanded') !== 'true') control.click();
+
+      for (let step = 0; step < 70; step += 1) {
+        const list = [...document.querySelectorAll('#resource-selector-container [role="listbox"]')].find(isVisible);
+        const options = list ? [...list.querySelectorAll('[data-resourceid], [data-resource-id]')] : [];
+        const option = options.find((element) => normalise(element.getAttribute('data-resourceid') || element.getAttribute('data-resource-id')) === wanted);
+        if (option) {
+          option.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
+          await pause(80);
+          option.click();
+          return { found: true };
+        }
+        if (list && list.scrollHeight > list.clientHeight + 4) {
+          const previousTop = list.scrollTop;
+          list.scrollTop = Math.min(list.scrollTop + Math.max(140, list.clientHeight * 0.8), list.scrollHeight);
+          if (list.scrollTop === previousTop) break;
+        }
+        await pause(90);
+      }
+      return { found: false, error: 'لم يظهر هذا الـ Property داخل قائمة حساب Search Console.' };
+    }
+  });
+  if (!result?.result?.found) throw new Error(result?.result?.error || 'تعذر اختيار الـ Property من قائمة Search Console.');
+  // Let Search Console acknowledge the click before the report route is opened.
+  await sleepWithCancellation(runId, 350);
+}
+
 async function waitForPropertySelector(tabId, runId) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
@@ -699,6 +747,24 @@ async function cropScreenshot(dataUrl, crop) {
   }
 }
 
+async function frameCroppedScreenshot(dataUrl, crop) {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const scale = Math.max(1, Math.min(bitmap.width / crop.width, bitmap.height / crop.height));
+    const frame = Math.max(8, Math.round(10 * scale));
+    const canvas = new OffscreenCanvas(bitmap.width + frame * 2, bitmap.height + frame * 2);
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#eef3f8';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(bitmap, frame, frame);
+    return dataUrlFromBlob(await canvas.convertToBlob({ type: 'image/png' }));
+  } finally {
+    bitmap.close();
+  }
+}
+
 async function captureVisibleTabFallback(tabId) {
   // This branch is only used when another DevTools client prevents debugger attachment.
   // The regular path below captures entirely in the background.
@@ -716,22 +782,29 @@ async function captureVisibleTabFallback(tabId) {
   }
 }
 
-async function captureBackgroundTab(tabId) {
+async function captureBackgroundTab(tabId, crop) {
   const target = { tabId };
   let attached = false;
   let debuggerError = null;
   try {
-    // captureVisibleTab only works for the foreground tab and loses its activeTab grant
-    // after navigation. CDP captures this specific GSC tab while the user works elsewhere.
+    // CDP captures the exact report crop at twice the CSS resolution while the user
+    // works elsewhere. It does not depend on the visible browser viewport.
     await chrome.debugger.attach(target, '1.3');
     attached = true;
     const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', {
       format: 'png',
       fromSurface: true,
-      captureBeyondViewport: false
+      captureBeyondViewport: true,
+      clip: {
+        x: crop.pageX ?? crop.x,
+        y: crop.pageY ?? crop.y,
+        width: crop.width,
+        height: crop.height,
+        scale: 2
+      }
     });
     if (!result?.data) throw new Error('لم يستجب المتصفح ببيانات الصورة.');
-    return `data:image/png;base64,${result.data}`;
+    return { imageData: `data:image/png;base64,${result.data}`, isExactCrop: true };
   } catch (error) {
     debuggerError = error;
   } finally {
@@ -745,7 +818,7 @@ async function captureBackgroundTab(tabId) {
   }
 
   try {
-    return await captureVisibleTabFallback(tabId);
+    return { imageData: await captureVisibleTabFallback(tabId), isExactCrop: false };
   } catch (fallbackError) {
     throw new Error(`تعذر التقاط صورة التقرير: ${debuggerError?.message || debuggerError || 'تعذر استخدام الالتقاط في الخلفية'}؛ ${fallbackError.message || fallbackError}`);
   }
@@ -758,10 +831,12 @@ async function captureReport(tabId, property, reportType, metrics = null) {
   });
   if (!target?.ok) throw new Error(target?.error || 'تعذر تجهيز لقطة الشاشة.');
 
-  const fullScreenshot = await captureBackgroundTab(tabId);
-  let image = fullScreenshot;
+  const captured = await captureBackgroundTab(tabId, target.crop);
+  let image = captured.imageData;
   try {
-    image = await cropScreenshot(fullScreenshot, target.crop);
+    image = captured.isExactCrop
+      ? await frameCroppedScreenshot(captured.imageData, target.crop)
+      : await cropScreenshot(captured.imageData, target.crop);
   } catch (error) {
     // A complete report capture is preferable to dropping a finished report if browser image APIs fail.
     console.warn('Could not crop Search Console screenshot', error);
@@ -844,7 +919,7 @@ async function processRun(runId) {
   let initialState = await getRunState();
   if (!initialState || initialState.id !== runId) return;
 
-  const { tabId, properties, options } = initialState;
+  const { tabId, properties, options, runMode } = initialState;
   try {
     for (let index = 0; index < properties.length; index += 1) {
       if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
@@ -863,6 +938,12 @@ async function processRun(runId) {
       await logRunEvent(runId, `بدء معالجة ${property.label} — الموقع ${index + 1} من ${properties.length}.`, 'info');
 
       try {
+        if (runMode === 'all') {
+          await setRecord(runId, index, { detail: 'جارٍ فتح قائمة الـ Properties واختيار الموقع التالي…' });
+          await logRunEvent(runId, `فتح قائمة الـ Properties واختيار ${property.label}.`, 'info');
+          await selectPropertyFromPicker(tabId, property.resourceId, runId);
+          await throwIfCancelled(runId);
+        }
         // Calculate first so declining clicks can be filtered before any image is saved.
         const performance = await runReport(runId, tabId, property, 'performance', index, { capture: false });
         const clicks = performance.calculation.metrics?.clicks || null;
