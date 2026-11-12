@@ -118,6 +118,59 @@ function displayProperty(resourceId) {
   }
 }
 
+function canonicalPropertyKey(resourceId) {
+  const decoded = decodeURIComponent(resourceId || '').trim().toLowerCase();
+  if (decoded.startsWith('sc-domain:')) return decoded.slice('sc-domain:'.length).replace(/^www\./, '');
+  try {
+    return new URL(decoded).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return decoded.replace(/^www\./, '');
+  }
+}
+
+function propertyPriority(resourceId) {
+  const decoded = decodeURIComponent(resourceId || '').trim().toLowerCase();
+  // A domain property covers every protocol and subdomain, so it is the preferred default.
+  if (decoded.startsWith('sc-domain:')) return 30;
+  if (decoded.startsWith('https://')) return 20;
+  if (decoded.startsWith('http://')) return 10;
+  return 0;
+}
+
+function preferDomainProperties(properties) {
+  const preferred = new Map();
+  properties.forEach((property) => {
+    const key = canonicalPropertyKey(property.resourceId);
+    const current = preferred.get(key);
+    if (!current || propertyPriority(property.resourceId) > propertyPriority(current.resourceId)) {
+      preferred.set(key, property);
+    }
+  });
+  return [...preferred.values()].sort((first, second) => first.label.localeCompare(second.label));
+}
+
+function resolveRequestedProperties(availableProperties, rawProperties) {
+  const byCanonicalKey = new Map();
+  availableProperties.forEach((property) => {
+    const key = canonicalPropertyKey(property.resourceId);
+    const candidates = byCanonicalKey.get(key) || [];
+    candidates.push(property);
+    byCanonicalKey.set(key, candidates);
+  });
+
+  const chosen = new Map();
+  rawProperties.forEach((rawProperty) => {
+    const resourceId = normaliseProperty(rawProperty);
+    const key = canonicalPropertyKey(resourceId);
+    const matchingProperties = byCanonicalKey.get(key) || [];
+    const bestMatch = preferDomainProperties(matchingProperties)[0];
+    // If the property selector did not surface this item, keep the explicit user input.
+    const property = bestMatch || { resourceId, label: displayProperty(resourceId) };
+    chosen.set(property.resourceId, property);
+  });
+  return [...chosen.values()];
+}
+
 function normaliseProperty(rawProperty) {
   const raw = decodeURIComponent(String(rawProperty || '').trim());
   if (!raw) throw new Error('وجدنا سطرًا فارغًا في قائمة المواقع.');
@@ -654,14 +707,21 @@ async function bootstrapAndProcessRun(runId) {
       latest.records[0].detail = 'جارٍ قراءة كل الـ Properties من حساب Search Console…';
     });
     const tab = await chrome.tabs.get(state.tabId);
-    const properties = await discoverPropertiesForTab(tab);
-    if (!properties.length) throw new Error('لم يتم العثور على أي Property في حساب Search Console المفتوح.');
+    const discoveredProperties = await discoverPropertiesForTab(tab);
+    if (!discoveredProperties.length) throw new Error('لم يتم العثور على أي Property في حساب Search Console المفتوح.');
     if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+
+    const properties = state.runMode === 'selected'
+      ? resolveRequestedProperties(discoveredProperties, state.requestedProperties)
+      : preferDomainProperties(discoveredProperties);
+    if (!properties.length) throw new Error('لم يتم العثور على Properties مطابقة للقائمة المطلوبة.');
 
     await updateRunState(runId, (latest) => {
       latest.properties = properties;
       latest.records = queuedRecords(properties);
-      latest.message = `تم استخراج ${properties.length} Property. جارٍ بدء التشغيل التلقائي…`;
+      latest.message = state.runMode === 'selected'
+        ? `تم اختيار ${properties.length} موقع من القائمة المحددة. جارٍ بدء التشغيل…`
+        : `تم استخراج ${discoveredProperties.length} Property واختيار ${properties.length} Domain Property مفضلة. جارٍ بدء التشغيل…`;
     });
     handedToProcessor = true;
     await processRun(runId);
@@ -698,17 +758,15 @@ async function startRun(message) {
     tab = await chrome.tabs.create({ url: 'about:blank', active: true });
   }
 
-  const manuallySupplied = message.rawProperties?.length > 0;
-  const unique = new Map();
-  if (manuallySupplied) {
-    message.rawProperties.forEach((input) => {
-      const resourceId = normaliseProperty(input);
-      unique.set(resourceId, { resourceId, label: displayProperty(resourceId) });
-    });
+  const runMode = message.mode === 'selected' ? 'selected' : 'all';
+  const requestedProperties = [...new Set((message.rawProperties || []).map((value) => String(value).trim()).filter(Boolean))];
+  if (runMode === 'selected' && !requestedProperties.length) {
+    throw new Error('أضف رابط موقع واحد على الأقل أو اختر تشغيل كل المواقع.');
   }
+  // Validate user-provided links before opening Search Console, so invalid input fails immediately.
+  if (runMode === 'selected') requestedProperties.forEach(normaliseProperty);
   const bootstrapProperty = { resourceId: BOOTSTRAP_RESOURCE_ID, label: displayProperty(BOOTSTRAP_RESOURCE_ID) };
-  const properties = manuallySupplied ? [...unique.values()] : [bootstrapProperty];
-  if (!properties.length) throw new Error('أضف موقعًا واحدًا على الأقل.');
+  const properties = [bootstrapProperty];
 
   let originalZoom = 1;
   try {
@@ -719,7 +777,7 @@ async function startRun(message) {
     // Zoom is only to fit the report card into one capture. The report can still run at the existing zoom.
   }
 
-  const automaticDiscovery = !manuallySupplied && message.autoDiscover !== false;
+  const automaticDiscovery = true;
   const state = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     status: 'running',
@@ -727,15 +785,15 @@ async function startRun(message) {
     tabId: tab.id,
     windowId: tab.windowId,
     originalZoom,
+    runMode,
+    requestedProperties,
     properties,
     options: {
       skipDecliningClicks: message.options?.skipDecliningClicks !== false,
       includeGenerativeAi: message.options?.includeGenerativeAi !== false
     },
     records: queuedRecords(properties),
-    message: automaticDiscovery
-      ? 'تم بدء التشغيل. جارٍ فتح Google Search Console تلقائيًا…'
-      : 'جارٍ تجهيز التقرير…',
+    message: 'تم بدء التشغيل. جارٍ فتح Google Search Console تلقائيًا…',
     cancelRequested: false
   };
   await saveRunState(state);

@@ -40,9 +40,22 @@
         </div>
       </section>
 
+      <section class="run-mode" aria-label="نطاق تشغيل التقارير">
+        <div class="mode-heading"><span>01</span><b>نطاق التشغيل</b></div>
+        <div class="mode-buttons" role="group" aria-label="اختيار المواقع">
+          <button id="mode-all" class="mode-button active" type="button"><span>◎</span> كل المواقع</button>
+          <button id="mode-selected" class="mode-button" type="button"><span>⌁</span> مواقع محددة</button>
+        </div>
+        <div id="selected-sites-box" class="selected-sites-box" hidden>
+          <label for="selected-sites">أضف رابطًا واحدًا في كل سطر</label>
+          <textarea id="selected-sites" rows="4" spellcheck="false" placeholder="https://sweetensugar.com/&#10;https://example.com/&#10;sc-domain:example.com"></textarea>
+          <p>لو لنفس الموقع Property بـ https وDomain Property، الإكستنشن يختار Domain Property تلقائيًا.</p>
+        </div>
+      </section>
+
       <div class="automation-steps" aria-label="مراحل التشغيل">
         <div><span>01</span><b>فتح Search Console</b><small>مقارنة آخر 7 أيام تلقائيًا</small></div>
-        <div><span>02</span><b>قراءة كل Properties</b><small>بدون نسخ أو لصق يدوي</small></div>
+        <div><span>02</span><b>قراءة Properties بذكاء</b><small>Domain Property له الأولوية</small></div>
         <div><span>03</span><b>حفظ اللقطات</b><small>داخل مكتبة الإكستنشن</small></div>
       </div>
 

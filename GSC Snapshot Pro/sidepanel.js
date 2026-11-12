@@ -4,12 +4,26 @@ let pollingTimer = null;
 let snapshots = [];
 let selectedSnapshotId = null;
 let domReady = false;
+let runMode = 'all';
 
 function setRunMessage(message = '', type = 'error') {
   const element = $('#run-message');
   if (!element) return;
   element.textContent = message;
   element.style.color = type === 'success' ? '#6ee7b7' : type === 'info' ? '#93c5fd' : '#fda4af';
+}
+
+function parseProperties(text) {
+  return text.split(/\r?\n|,/).map((line) => line.trim()).filter(Boolean);
+}
+
+function setRunMode(mode) {
+  runMode = mode;
+  const selected = mode === 'selected';
+  $('#mode-all').classList.toggle('active', !selected);
+  $('#mode-selected').classList.toggle('active', selected);
+  $('#selected-sites-box').hidden = !selected;
+  if (selected) $('#selected-sites').focus();
 }
 
 function formatMetric(metric) {
@@ -87,10 +101,15 @@ async function startRun() {
   button.disabled = true;
   setRunMessage('', 'info');
   try {
+    const rawProperties = runMode === 'selected' ? parseProperties($('#selected-sites').value) : [];
+    if (runMode === 'selected' && !rawProperties.length) {
+      throw new Error('أضف رابط موقع واحد على الأقل، أو اختر تشغيل كل المواقع.');
+    }
     const response = await chrome.runtime.sendMessage({
       type: 'START_RUN',
+      mode: runMode,
       autoDiscover: true,
-      rawProperties: [],
+      rawProperties,
       options: {
         skipDecliningClicks: true,
         includeGenerativeAi: true
@@ -270,6 +289,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   domReady = true;
   $('#tab-run').addEventListener('click', () => switchView('run'));
   $('#tab-library').addEventListener('click', () => switchView('library'));
+  $('#mode-all').addEventListener('click', () => setRunMode('all'));
+  $('#mode-selected').addEventListener('click', () => setRunMode('selected'));
   $('#start-run').addEventListener('click', startRun);
   $('#cancel-run').addEventListener('click', cancelRun);
   $('#export-snapshot').addEventListener('click', safelyRun(exportSelectedSnapshot));
