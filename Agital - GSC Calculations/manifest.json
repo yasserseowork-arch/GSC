@@ -1,0 +1,24 @@
+
+{
+"update_url": "https://clients2.google.com/service/update2/crx",
+
+  "manifest_version": 3,
+  "name": "Agital - GSC Calculations",
+  "version": "1.6",
+  "description": "Calculates percentage change for clicks, impressions, CTR, and position in GSC. Adds Google Algorithm Updates to Timeline graphs",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_title": "Agital - GSC Calculations",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

@@ -1,0 +1,97 @@
+body {
+    width: 450px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    font-family: Arial, sans-serif;
+    margin: 0;
+    border-radius: 0 !important;
+}
+
+.container {
+    width: 100%;
+    border-radius: 10px;
+    background-color: white;
+    position: relative;
+    margin-top: 0px;
+    box-shadow: 0px 0px 20px #0000002b;
+    border: 1px solid #d7d7cc;
+}
+
+.header {
+    display: flex;
+    background: #f0f0e6;
+    padding: 20px;
+    align-items: center;
+    font-size: 27px;
+    font-weight: bold;
+    gap: 15px;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+}
+
+.header img {
+    /* Adjust the size of your logo as needed */
+    width: 50px;
+    height: 50px;
+}
+
+/* Stack the buttons vertically */
+.button-container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+    gap: 10px;
+}
+
+button {
+    padding: 10px 16px;
+    font-size: 15px;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    /* Ensures buttons have the same width */
+    min-width: 250px;
+}
+
+/* Individual background colors and hover states */
+#run-script {
+    background-color: #974cd9;
+}
+
+#run-script:hover {
+    background-color: #b06dea;
+}
+
+#show-algo-updates {
+    background-color: #176f34;
+}
+
+#show-algo-updates:hover {
+    background-color: #1e8c40;
+}
+
+/* Link and status styling */
+#news {
+    text-align: center;
+    font-size: 12px;
+    padding: 0 20px 20px 20px;
+}
+
+#news a {
+    text-decoration: underline;
+    color: #176f34;
+    font-weight: bold;
+}
+
+#status {
+    text-align: center;
+    font-size: 12px;
+    padding: 0 20px 20px 20px;
+    margin: 0;
+}
