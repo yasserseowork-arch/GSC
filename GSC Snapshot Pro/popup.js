@@ -174,17 +174,17 @@ async function activeTab() {
 async function runManualCalculations() {
   const button = $('#run-script');
   button.disabled = true;
-  setManualStatus('جارٍ تطبيق حسابات Agital…');
+  setManualStatus('جارٍ تطبيق حسابات المقارنة…');
   try {
     const tab = await activeTab();
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
     const result = await chrome.tabs.sendMessage(tab.id, {
-      type: 'AGITAL_RUN_CALCULATIONS',
+      type: 'GSC_SNAPSHOT_RUN_CALCULATIONS',
       reportType: 'performance',
       waitForData: false
     });
     if (!result?.ok) throw new Error(result?.error || 'تعذر تطبيق الحسابات على هذه الصفحة.');
-    setManualStatus('Percentage changes were applied successfully.', 'success');
+    setManualStatus('تمت إضافة نسب التغيير إلى التقرير بنجاح.', 'success');
   } catch (error) {
     showError(error);
   } finally {

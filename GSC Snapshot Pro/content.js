@@ -1,9 +1,11 @@
 (() => {
-  // This file is injected both by the manual Agital button and by the auto reporter.
+  // This file is injected both by the manual calculator and by the auto reporter.
   // Guarding it prevents duplicate listeners when a user clicks the manual button twice.
-  if (window.__agitalGscReporterLoaded) return;
-  window.__agitalGscReporterLoaded = true;
+  if (window.__gscSnapshotReporterLoaded) return;
+  window.__gscSnapshotReporterLoaded = true;
 
+  const REPORT_DATA_TIMEOUT_MS = 90000;
+  const DATA_POLL_INTERVAL_MS = 750;
   const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
   const isVisible = (element) => Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
 
@@ -72,11 +74,27 @@
     return Boolean(getMetric(required));
   }
 
-  async function waitForComparisonData(reportType, timeout = 45000) {
+  function comparisonSignature(reportType) {
+    const required = reportType === 'generative-ai' ? 'IMPRESSIONS' : 'CLICKS';
+    const metric = getMetric(required);
+    return metric ? `${metric.current}:${metric.previous}` : null;
+  }
+
+  async function waitForComparisonData(reportType, timeout = REPORT_DATA_TIMEOUT_MS) {
     const startedAt = Date.now();
+    let previousSignature = null;
+    let stableReads = 0;
+
     while (Date.now() - startedAt < timeout) {
-      if (hasComparisonData(reportType)) return true;
-      await sleep(500);
+      const signature = comparisonSignature(reportType);
+      if (signature) {
+        // A second identical read prevents taking a screenshot while GSC is replacing
+        // the old property card during a single-page-app navigation.
+        stableReads = signature === previousSignature ? stableReads + 1 : 0;
+        previousSignature = signature;
+        if (stableReads >= 1) return true;
+      }
+      await sleep(DATA_POLL_INTERVAL_MS);
     }
     return false;
   }
@@ -100,11 +118,11 @@
     const card = cards[cards.length - 1];
     if (!card) return data;
 
-    card.querySelectorAll(`.agital-percentage-change[data-agital-label="${label}"]`).forEach((element) => element.remove());
+    card.querySelectorAll(`.gsc-snapshot-percentage-change[data-gsc-snapshot-label="${label}"]`).forEach((element) => element.remove());
     const metric = { data, kind };
     const percentageElement = document.createElement('div');
-    percentageElement.className = 'agital-percentage-change';
-    percentageElement.dataset.agitalLabel = label;
+    percentageElement.className = 'gsc-snapshot-percentage-change';
+    percentageElement.dataset.gscSnapshotLabel = label;
     percentageElement.style.cssText = 'font-size:15px;font-weight:bold;margin-top:10px;color:inherit;line-height:1.25;';
 
     const prefix = document.createElement('span');
@@ -135,10 +153,10 @@
           const targetCell = cells[target];
           if (!targetCell || !Number.isFinite(previousValue) || !Number.isFinite(currentValue)) return;
 
-          targetCell.querySelectorAll('.agital-row-percentage-change').forEach((element) => element.remove());
+          targetCell.querySelectorAll('.gsc-snapshot-row-percentage-change').forEach((element) => element.remove());
           const percentage = previousValue === 0 ? null : ((currentValue - previousValue) / previousValue) * 100;
           const badge = document.createElement('div');
-          badge.className = 'agital-row-percentage-change';
+          badge.className = 'gsc-snapshot-row-percentage-change';
           badge.textContent = `(${percentage === null ? '—' : `${percentage.toFixed(2)}%`})`;
           badge.style.cssText = `display:inline-block;border:1px solid ${percentage !== null && percentage >= 0 ? 'green' : 'red'};padding:2px 4px;margin-top:5px;border-radius:3px;`;
           targetCell.appendChild(badge);
@@ -160,7 +178,7 @@
     if (!available) {
       return {
         ok: false,
-        error: 'Comparison data was not found. Select Compare → Last 7 days vs previous period, then try again.'
+        error: 'لم تصل بيانات المقارنة خلال 90 ثانية. تأكد أن تقرير Last 7 days مقابل Previous period متاح لهذا الموقع ثم أعد المحاولة.'
       };
     }
 
@@ -199,8 +217,9 @@
     const root = findReportRoot(reportType);
     if (!root) return { ok: false, error: 'The Search Console report card was not found.' };
 
-    root.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'instant' });
-    await sleep(650);
+    root.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'auto' });
+    // Give charts and web fonts a moment to repaint after scrolling before Chrome captures the tab.
+    await sleep(1000);
     const rect = root.getBoundingClientRect();
     const padding = 10;
     const left = Math.max(0, rect.left - padding);
@@ -223,11 +242,11 @@
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message?.type === 'AGITAL_RUN_CALCULATIONS') {
+    if (message?.type === 'GSC_SNAPSHOT_RUN_CALCULATIONS') {
       runCalculations(message).then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
       return true;
     }
-    if (message?.type === 'AGITAL_PREPARE_CAPTURE') {
+    if (message?.type === 'GSC_SNAPSHOT_PREPARE_CAPTURE') {
       prepareCapture(message).then(sendResponse).catch((error) => sendResponse({ ok: false, error: error.message }));
       return true;
     }

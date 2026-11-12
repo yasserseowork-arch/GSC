@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Agital GSC Auto Reporter",
-  "version": "2.0.0",
-  "description": "Creates week-over-week Google Search Console screenshots and adds Agital percentage calculations automatically.",
+  "name": "GSC Snapshot Pro",
+  "version": "2.1.0",
+  "description": "Creates reliable week-over-week Google Search Console screenshots with calculated performance changes.",
   "permissions": [
     "activeTab",
     "downloads",
@@ -14,7 +14,7 @@
     "https://search.google.com/*"
   ],
   "action": {
-    "default_title": "Agital GSC Auto Reporter",
+    "default_title": "GSC Snapshot Pro",
     "default_popup": "popup.html"
   },
   "background": {

@@ -1,7 +1,10 @@
-const RUN_STORAGE_KEY = 'agitalGscAutoReporterRun';
+const RUN_STORAGE_KEY = 'gscSnapshotProRun';
 const GSC_ORIGIN = 'https://search.google.com';
 const REPORT_ZOOM = 0.8;
-const LOAD_TIMEOUT_MS = 60000;
+const ROUTE_TIMEOUT_MS = 30000;
+const REPORT_SETTLE_DELAY_MS = 2200;
+const RETRY_DELAY_MS = 3500;
+const MAX_REPORT_ATTEMPTS = 2;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -71,7 +74,7 @@ function safeFileSegment(value) {
 function reportFileName(property, reportType) {
   const day = new Date().toISOString().slice(0, 10);
   const reportName = reportType === 'generative-ai' ? 'generative-ai' : 'performance';
-  return `GSC week over week/${safeFileSegment(property.label)}/${reportName}-week-over-week-${day}.png`;
+  return `GSC Snapshot Pro/${safeFileSegment(property.label)}/${reportName}-week-over-week-${day}.png`;
 }
 
 async function getRunState() {
@@ -190,35 +193,43 @@ async function discoverProperties() {
   return [...all.values()];
 }
 
-function waitForTabLoad(tabId) {
-  return new Promise((resolve, reject) => {
-    let finished = false;
-    const finish = (callback, value) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(onUpdated);
-      chrome.tabs.onRemoved.removeListener(onRemoved);
-      callback(value);
-    };
-    const onUpdated = (updatedTabId, changeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') finish(resolve);
-    };
-    const onRemoved = (removedTabId) => {
-      if (removedTabId === tabId) finish(reject, new Error('تم إغلاق تبويب Google Search Console أثناء التشغيل.'));
-    };
-    const timer = setTimeout(() => finish(reject, new Error('استغرق تحميل Google Search Console وقتًا أطول من المتوقع.')), LOAD_TIMEOUT_MS);
-    chrome.tabs.onUpdated.addListener(onUpdated);
-    chrome.tabs.onRemoved.addListener(onRemoved);
-  });
+function isExpectedReportRoute(currentUrl, targetUrl) {
+  try {
+    const current = new URL(currentUrl);
+    const target = new URL(targetUrl);
+    return current.origin === target.origin
+      && current.pathname === target.pathname
+      && current.searchParams.get('resource_id') === target.searchParams.get('resource_id')
+      && current.searchParams.get('num_of_days') === '7'
+      && current.searchParams.get('compare_date') === 'PREV';
+  } catch {
+    return false;
+  }
+}
+
+async function waitForReportRoute(tabId, targetUrl) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch {
+      throw new Error('تم إغلاق تبويب Google Search Console أثناء التشغيل.');
+    }
+
+    // Search Console is a single-page app. Moving between reports often changes the URL
+    // without emitting a new "complete" tab-loading event, which caused the old 60s timeout.
+    if (isExpectedReportRoute(tab.url, targetUrl)) return;
+    await sleep(300);
+  }
+  throw new Error('لم يتم فتح رابط تقرير Google Search Console. تأكد أن حسابك لديه صلاحية للموقع وأنك ما زلت مسجل الدخول.');
 }
 
 async function navigateToReport(tabId, url) {
-  const loading = waitForTabLoad(tabId);
   await chrome.tabs.update(tabId, { url, active: true });
-  await loading;
-  // The tab reports "complete" before Search Console finishes its client-side data request.
-  await sleep(850);
+  await waitForReportRoute(tabId, url);
+  // Let the SPA finish replacing the old report card before reading its metrics.
+  await sleep(REPORT_SETTLE_DELAY_MS);
 }
 
 async function injectReporter(tabId) {
@@ -229,7 +240,7 @@ async function injectReporter(tabId) {
 async function runCalculationsInTab(tabId, reportType) {
   await injectReporter(tabId);
   return chrome.tabs.sendMessage(tabId, {
-    type: 'AGITAL_RUN_CALCULATIONS',
+    type: 'GSC_SNAPSHOT_RUN_CALCULATIONS',
     reportType,
     waitForData: true
   });
@@ -279,7 +290,7 @@ async function cropScreenshot(dataUrl, crop) {
 async function captureReport(tabId, windowId, property, reportType) {
   await chrome.tabs.update(tabId, { active: true });
   const target = await chrome.tabs.sendMessage(tabId, {
-    type: 'AGITAL_PREPARE_CAPTURE',
+    type: 'GSC_SNAPSHOT_PREPARE_CAPTURE',
     reportType
   });
   if (!target?.ok) throw new Error(target?.error || 'تعذر تجهيز لقطة الشاشة.');
@@ -317,19 +328,40 @@ async function setRecord(runId, index, changes) {
 
 async function runReport(runId, tabId, windowId, property, reportType, recordIndex, { capture = true } = {}) {
   const routeName = reportType === 'generative-ai' ? 'Generative AI features' : 'Performance';
-  await setRecord(runId, recordIndex, { detail: `جارٍ فتح ${routeName}…` });
-  await navigateToReport(tabId, reportUrl(property.resourceId, reportType));
-  if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+  const targetUrl = reportUrl(property.resourceId, reportType);
+  let lastError;
 
-  await setRecord(runId, recordIndex, { detail: `جارٍ حساب التغيير في ${routeName}…` });
-  const calculation = await runCalculationsInTab(tabId, reportType);
-  if (!calculation?.ok) throw new Error(calculation?.error || `تعذر قراءة مقارنة ${routeName}.`);
-  if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+  for (let attempt = 1; attempt <= MAX_REPORT_ATTEMPTS; attempt += 1) {
+    try {
+      await setRecord(runId, recordIndex, {
+        detail: attempt === 1
+          ? `جارٍ فتح ${routeName}…`
+          : `لم تكتمل البيانات بعد؛ جارٍ إعادة محاولة ${routeName} (${attempt}/${MAX_REPORT_ATTEMPTS})…`
+      });
+      await navigateToReport(tabId, targetUrl);
+      if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
 
-  if (!capture) return { calculation };
-  await setRecord(runId, recordIndex, { detail: `جارٍ حفظ لقطة ${routeName}…` });
-  const saved = await captureReport(tabId, windowId, property, reportType);
-  return { calculation, saved };
+      await setRecord(runId, recordIndex, { detail: `جارٍ انتظار وتحليل بيانات ${routeName}…` });
+      const calculation = await runCalculationsInTab(tabId, reportType);
+      if (!calculation?.ok) throw new Error(calculation?.error || `تعذر قراءة مقارنة ${routeName}.`);
+      if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+
+      if (!capture) return { calculation };
+      await setRecord(runId, recordIndex, { detail: `جارٍ تثبيت وحفظ لقطة ${routeName}…` });
+      await sleep(700);
+      const saved = await captureReport(tabId, windowId, property, reportType);
+      return { calculation, saved };
+    } catch (error) {
+      if (error.message === '__CANCELLED__') throw error;
+      lastError = error;
+      if (attempt < MAX_REPORT_ATTEMPTS) {
+        await setRecord(runId, recordIndex, { detail: `تأخر GSC في تحميل البيانات؛ انتظار ${RETRY_DELAY_MS / 1000} ثوانٍ قبل المحاولة التالية…` });
+        await sleep(RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  throw new Error(lastError?.message || `تعذر تحميل تقرير ${routeName}.`);
 }
 
 async function processRun(runId) {
