@@ -14,6 +14,13 @@ function setRunMessage(message = '', type = 'error') {
   element.style.color = type === 'success' ? '#6ee7b7' : type === 'info' ? '#93c5fd' : '#fda4af';
 }
 
+function setLibraryMessage(message = '', type = 'info') {
+  const element = $('#library-message');
+  if (!element) return;
+  element.textContent = message;
+  element.style.color = type === 'success' ? '#6ee7b7' : type === 'error' ? '#fda4af' : '#94a3b8';
+}
+
 function parseProperties(text) {
   return text.split(/\r?\n|,/).map((line) => line.trim()).filter(Boolean);
 }
@@ -322,19 +329,35 @@ async function selectSnapshot(snapshotId) {
     renderSnapshotList();
   } catch (error) {
     console.error(error);
+    setLibraryMessage(`تعذر فتح الصورة المختارة: ${error.message}`, 'error');
     resetPreview();
   }
 }
 
-async function loadSnapshots({ retainSelection = true } = {}) {
-  const response = await chrome.runtime.sendMessage({ type: 'LIST_SNAPSHOTS' });
-  if (response?.error) throw new Error(response.error);
-  snapshots = response?.snapshots || [];
-  if (!snapshots.some((snapshot) => snapshot.id === selectedSnapshotId)) selectedSnapshotId = null;
-  renderSnapshotList();
-  if (retainSelection && selectedSnapshotId) await selectSnapshot(selectedSnapshotId);
-  else if (snapshots.length) await selectSnapshot(snapshots[0].id);
-  else resetPreview();
+async function loadSnapshots({ retainSelection = true, announce = true } = {}) {
+  const refreshButton = $('#refresh-library');
+  if (refreshButton) refreshButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'LIST_SNAPSHOTS' });
+    if (response?.error) throw new Error(response.error);
+    snapshots = response?.snapshots || [];
+    if (!snapshots.some((snapshot) => snapshot.id === selectedSnapshotId)) selectedSnapshotId = null;
+    renderSnapshotList();
+    if (retainSelection && selectedSnapshotId) await selectSnapshot(selectedSnapshotId);
+    else if (snapshots.length) await selectSnapshot(snapshots[0].id);
+    else resetPreview();
+    if (announce) {
+      setLibraryMessage(
+        snapshots.length ? `تم تحديث المكتبة: ${snapshots.length} لقطة محفوظة.` : 'المكتبة فارغة حاليًا. ستظهر الصور هنا فور حفظها.',
+        snapshots.length ? 'success' : 'info'
+      );
+    }
+  } catch (error) {
+    setLibraryMessage(`تعذر قراءة مكتبة اللقطات: ${error.message}`, 'error');
+    throw error;
+  } finally {
+    if (refreshButton) refreshButton.disabled = false;
+  }
 }
 
 async function refreshSnapshotSummary() {
@@ -401,6 +424,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#start-run').addEventListener('click', startRun);
   $('#cancel-run').addEventListener('click', cancelRun);
   $('#reset-run-interface').addEventListener('click', safelyRun(resetRunInterface));
+  $('#refresh-library').addEventListener('click', safelyRun(() => loadSnapshots({ retainSelection: true })));
   $('#export-snapshot').addEventListener('click', safelyRun(exportSelectedSnapshot));
   $('#delete-snapshot').addEventListener('click', safelyRun(deleteSelectedSnapshot));
   $('#clear-library').addEventListener('click', safelyRun(clearLibrary));

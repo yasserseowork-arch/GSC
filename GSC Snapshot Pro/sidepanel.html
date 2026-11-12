@@ -82,8 +82,10 @@
     <section id="library-view" class="view" hidden>
       <section class="library-summary">
         <div><span class="summary-dot"></span><b id="snapshot-count">0</b> لقطة محفوظة داخل الإكستنشن</div>
+        <button id="refresh-library" class="refresh-button" type="button">↻ تحديث</button>
         <button id="clear-library" class="clear-button" type="button">مسح الكل</button>
         <small>الصور منظمة داخل مجلدات باسم الـ Property، وكل ملف يحمل تاريخ ووقت الحفظ فقط.</small>
+        <p id="library-message" class="library-message" aria-live="polite"></p>
       </section>
 
       <div class="library-layout">

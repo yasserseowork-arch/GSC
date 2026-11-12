@@ -6,6 +6,7 @@ const REPORT_SETTLE_DELAY_MS = 2200;
 const SEARCH_CONSOLE_HOME_SETTLE_DELAY_MS = 350;
 const MAX_REPORT_ATTEMPTS = 1;
 const SNAPSHOT_DB_NAME = 'gscSnapshotProDatabase';
+const SNAPSHOT_DB_VERSION = 2;
 const SNAPSHOT_STORE_NAME = 'snapshots';
 
 let snapshotDatabasePromise;
@@ -19,14 +20,16 @@ function createSnapshotId() {
 function openSnapshotDatabase() {
   if (snapshotDatabasePromise) return snapshotDatabasePromise;
   snapshotDatabasePromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(SNAPSHOT_DB_NAME, 1);
+    const request = indexedDB.open(SNAPSHOT_DB_NAME, SNAPSHOT_DB_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
-      if (!database.objectStoreNames.contains(SNAPSHOT_STORE_NAME)) {
-        const store = database.createObjectStore(SNAPSHOT_STORE_NAME, { keyPath: 'id' });
-        store.createIndex('createdAt', 'createdAt');
-        store.createIndex('resourceId', 'resourceId');
-      }
+      const transaction = request.transaction;
+      const store = database.objectStoreNames.contains(SNAPSHOT_STORE_NAME)
+        ? transaction.objectStore(SNAPSHOT_STORE_NAME)
+        : database.createObjectStore(SNAPSHOT_STORE_NAME, { keyPath: 'id' });
+      if (!store.indexNames.contains('createdAt')) store.createIndex('createdAt', 'createdAt');
+      if (!store.indexNames.contains('resourceId')) store.createIndex('resourceId', 'resourceId');
+      if (!store.indexNames.contains('propertyKey')) store.createIndex('propertyKey', 'propertyKey');
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => {
@@ -38,8 +41,15 @@ function openSnapshotDatabase() {
 }
 
 async function saveSnapshot(snapshot) {
+  if (!snapshot?.imageData || !String(snapshot.imageData).startsWith('data:image/')) {
+    throw new Error('لم تصل صورة صالحة إلى مكتبة اللقطات.');
+  }
   const database = await openSnapshotDatabase();
-  const record = { id: createSnapshotId(), ...snapshot };
+  const record = {
+    id: createSnapshotId(),
+    ...snapshot,
+    propertyKey: canonicalPropertyKey(snapshot.resourceId || snapshot.propertyLabel)
+  };
   await new Promise((resolve, reject) => {
     const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readwrite');
     transaction.objectStore(SNAPSHOT_STORE_NAME).put(record);
