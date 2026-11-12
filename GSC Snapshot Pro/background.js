@@ -432,18 +432,28 @@ async function discoverPropertiesForTab(tab) {
       let menuWasOpened = false;
       let openedMenuRoots = [];
       if (propertyControl) {
-        const pickerWasAlreadyOpen = propertyControl.getAttribute('aria-expanded') === 'true' || propertyMenuRoots().length > 0;
+        // A closed GSC listbox can remain in the DOM. aria-expanded on the control is
+        // the reliable signal; do not mistake that closed list for an already-open picker.
+        const pickerWasAlreadyOpen = propertyControl.getAttribute('aria-expanded') === 'true';
         if (!pickerWasAlreadyOpen) {
           propertyControl.click();
           menuWasOpened = true;
         }
-        // Poll only until the real picker rows appear. On a warm GSC page this resolves
-        // almost immediately, instead of pausing for a fixed multi-second delay.
+        // Wait for the complete picker, not merely its first current row. GSC reports
+        // the number of rows in data-childcount (the final row is "Add property").
         const pickerDeadline = Date.now() + 4000;
+        let stableReads = 0;
+        let previousCount = 0;
         while (Date.now() < pickerDeadline) {
           openedMenuRoots = propertyMenuRoots();
           openedMenuRoots.forEach((menuRoot) => scan(menuRoot));
-          if (items.size) break;
+          const expectedRows = Math.max(0, ...openedMenuRoots.map((menuRoot) => Number(menuRoot.getAttribute('data-childcount')) || 0));
+          if (expectedRows && items.size >= expectedRows - 1) break;
+          if (!expectedRows && items.size > 0) {
+            stableReads = items.size === previousCount ? stableReads + 1 : 0;
+            if (stableReads >= 3) break;
+          }
+          previousCount = items.size;
           await pause(100);
         }
       }
@@ -484,7 +494,7 @@ async function discoverPropertiesForTab(tab) {
         await pause(180);
         let stalledSteps = 0;
         let previousCount = items.size;
-        for (let step = 0; step < 80 && stalledSteps < 4; step += 1) {
+        for (let step = 0; step < 100 && stalledSteps < 12; step += 1) {
           scan(scrollRoot);
           const atBottom = scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 2;
           if (items.size === previousCount) stalledSteps += 1;
@@ -492,7 +502,7 @@ async function discoverPropertiesForTab(tab) {
           previousCount = items.size;
           if (atBottom) break;
           scrollRoot.scrollTop = Math.min(scrollRoot.scrollTop + Math.max(160, scrollRoot.clientHeight * 0.8), scrollRoot.scrollHeight);
-          await pause(180);
+          await pause(120);
         }
         scan(scrollRoot);
         scrollRoot.scrollTop = 0;
@@ -752,6 +762,13 @@ async function frameCroppedScreenshot(dataUrl, crop) {
   const blob = await response.blob();
   const bitmap = await createImageBitmap(blob);
   try {
+    const expectedRatio = crop.width / crop.height;
+    const actualRatio = bitmap.width / bitmap.height;
+    // Some Chrome builds ignore CDP's clip while a page is being composited. Detect
+    // that full-viewport response and crop it explicitly rather than saving it whole.
+    if (Math.abs(actualRatio - expectedRatio) / expectedRatio > 0.08) {
+      return cropScreenshot(dataUrl, crop);
+    }
     const scale = Math.max(1, Math.min(bitmap.width / crop.width, bitmap.height / crop.height));
     const frame = Math.max(8, Math.round(10 * scale));
     const canvas = new OffscreenCanvas(bitmap.width + frame * 2, bitmap.height + frame * 2);
@@ -838,8 +855,9 @@ async function captureReport(tabId, property, reportType, metrics = null) {
       ? await frameCroppedScreenshot(captured.imageData, target.crop)
       : await cropScreenshot(captured.imageData, target.crop);
   } catch (error) {
-    // A complete report capture is preferable to dropping a finished report if browser image APIs fail.
-    console.warn('Could not crop Search Console screenshot', error);
+    // Never save a full browser screenshot. A failed crop must be visible as an error
+    // so the next Property can continue without polluting the snapshot library.
+    throw new Error(`تعذر قص لقطة التقرير إلى منطقة البطاقات والرسم: ${error.message || error}`);
   }
 
   const createdAt = Date.now();
