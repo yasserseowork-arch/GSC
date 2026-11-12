@@ -32,6 +32,10 @@ function formatMetric(metric) {
   return `${sign}${metric.change.toFixed(2)}% نقرات`;
 }
 
+function eventTime(timestamp) {
+  return new Intl.DateTimeFormat('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(new Date(timestamp));
+}
+
 function recordSummary(record) {
   const metric = formatMetric(record.clicks);
   if (record.status === 'skipped') return `${record.label}: تم التخطي${metric ? ` (${metric})` : ''}`;
@@ -68,6 +72,23 @@ function renderRunState(state) {
     item.className = record.status || '';
     item.textContent = recordSummary(record);
     list.appendChild(item);
+  });
+
+  const events = state?.events || [];
+  const activityPanel = $('#activity-panel');
+  activityPanel.hidden = events.length === 0;
+  $('#activity-count').textContent = String(events.length);
+  const activityLog = $('#activity-log');
+  activityLog.replaceChildren();
+  [...events].reverse().forEach((event) => {
+    const item = document.createElement('li');
+    item.className = event.type || 'info';
+    const text = document.createElement('span');
+    text.textContent = event.message;
+    const time = document.createElement('time');
+    time.textContent = eventTime(event.at);
+    item.append(text, time);
+    activityLog.appendChild(item);
   });
 }
 

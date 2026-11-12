@@ -36,7 +36,7 @@
         <div>
           <span class="eyebrow">تشغيل تلقائي بالكامل</span>
           <h2>كل Properties في حسابك</h2>
-          <p>اضغط بدء فقط. الإكستنشن يفتح Search Console، يبدأ من <bdi>sweetensugar.com</bdi>، يستخرج كل المواقع المتاحة، ثم يشغّلها واحدًا واحدًا.</p>
+          <p>اضغط بدء فقط. الإكستنشن يفتح Search Console بحسابك، يستخرج كل المواقع المتاحة، ثم يشغّلها واحدًا واحدًا بدون اختيار موقع بداية ثابت.</p>
         </div>
       </section>
 
@@ -48,7 +48,7 @@
         </div>
         <div id="selected-sites-box" class="selected-sites-box" hidden>
           <label for="selected-sites">أضف رابطًا واحدًا في كل سطر</label>
-          <textarea id="selected-sites" rows="4" spellcheck="false" placeholder="https://sweetensugar.com/&#10;https://example.com/&#10;sc-domain:example.com"></textarea>
+          <textarea id="selected-sites" rows="4" spellcheck="false" placeholder="https://your-store.com/&#10;https://example.com/&#10;sc-domain:example.com"></textarea>
           <p>لو لنفس الموقع Property بـ https وDomain Property، الإكستنشن يختار Domain Property تلقائيًا.</p>
         </div>
       </section>
@@ -66,6 +66,11 @@
         <div class="run-heading"><span id="run-indicator" class="indicator"></span><strong id="run-status">في الانتظار</strong></div>
         <p id="run-detail" class="run-detail"></p>
         <ol id="run-records" class="run-records"></ol>
+      </section>
+
+      <section id="activity-panel" class="activity-panel" aria-live="polite" hidden>
+        <div class="activity-heading"><span>⌁</span><b>سجل ما يحدث الآن</b><small id="activity-count">0</small></div>
+        <ol id="activity-log" class="activity-log"></ol>
       </section>
 
       <p id="run-message" class="run-message" aria-live="polite"></p>

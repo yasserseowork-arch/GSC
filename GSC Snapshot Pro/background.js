@@ -1,7 +1,7 @@
 const RUN_STORAGE_KEY = 'gscSnapshotProRun';
 const GSC_ORIGIN = 'https://search.google.com';
 const REPORT_ZOOM = 0.8;
-const BOOTSTRAP_RESOURCE_ID = 'sc-domain:sweetensugar.com';
+const SEARCH_CONSOLE_HOME_URL = `${GSC_ORIGIN}/search-console`;
 const ROUTE_TIMEOUT_MS = 30000;
 const REPORT_SETTLE_DELAY_MS = 2200;
 const MAX_REPORT_ATTEMPTS = 1;
@@ -239,6 +239,16 @@ async function updateRunState(runId, update) {
   return saveRunState(state);
 }
 
+function appendRunEvent(state, message, type = 'info') {
+  state.events ||= [];
+  state.events.push({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, at: Date.now(), message, type });
+  if (state.events.length > 80) state.events.splice(0, state.events.length - 80);
+}
+
+async function logRunEvent(runId, message, type = 'info') {
+  return updateRunState(runId, (state) => appendRunEvent(state, message, type));
+}
+
 async function getActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tabs[0]?.id) throw new Error('لم يتم العثور على تبويب نشط.');
@@ -278,12 +288,12 @@ async function getCurrentProperty() {
 }
 
 async function discoverPropertiesForTab(tab) {
+  if (!isGscUrl(tab.url)) throw new Error('تعذر فتح Google Search Console لقراءة قائمة الـ Properties.');
   const current = propertyFromUrl(tab.url);
-  if (!current) throw new Error('افتح Google Search Console أولًا لاستيراد قائمة الخصائص.');
 
   const [result] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    args: [current.resourceId],
+    args: [current?.resourceId || ''],
     func: async (currentResourceId) => {
       const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
       const items = new Map();
@@ -312,7 +322,9 @@ async function discoverPropertiesForTab(tab) {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
       };
-      const displayCurrent = decodeURIComponent(currentResourceId).replace(/^sc-domain:/, '').toLowerCase();
+      const displayCurrent = currentResourceId
+        ? decodeURIComponent(currentResourceId).replace(/^sc-domain:/, '').toLowerCase()
+        : '';
       // This stable Search Console container is more reliable than guessing from the page's URL-inspection input.
       const selectorControl = document.querySelector('#resource-selector-container [role="button"][aria-haspopup="menu"]');
       const propertyControl = selectorControl || [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], button, [role="button"]')]
@@ -386,7 +398,7 @@ async function discoverPropertiesForTab(tab) {
   });
 
   const found = result?.result || [];
-  const all = new Map([[current.resourceId, current]]);
+  const all = new Map(current ? [[current.resourceId, current]] : []);
   found.forEach((property) => {
     if (property?.resourceId) all.set(property.resourceId, {
       resourceId: property.resourceId,
@@ -437,6 +449,42 @@ async function navigateToReport(tabId, url) {
   await waitForReportRoute(tabId, url);
   // Let the SPA finish replacing the old report card before reading its metrics.
   await sleep(REPORT_SETTLE_DELAY_MS);
+}
+
+async function waitForPropertySelector(tabId) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
+    try {
+      const [result] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => Boolean(document.querySelector('#resource-selector-container [role="button"][aria-haspopup="menu"]'))
+      });
+      if (result?.result) return;
+    } catch {
+      throw new Error('تعذر الوصول إلى واجهة Google Search Console.');
+    }
+    await sleep(400);
+  }
+  throw new Error('لم تظهر قائمة الـ Properties في Search Console. تأكد من تسجيل الدخول وأن الحساب لديه مواقع مضافة.');
+}
+
+async function navigateToSearchConsoleHome(tabId) {
+  await chrome.tabs.update(tabId, { url: SEARCH_CONSOLE_HOME_URL, active: true });
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (isGscUrl(tab.url)) {
+        await sleep(REPORT_SETTLE_DELAY_MS);
+        await waitForPropertySelector(tabId);
+        return chrome.tabs.get(tabId);
+      }
+    } catch {
+      throw new Error('تم إغلاق تبويب Google Search Console أثناء التشغيل.');
+    }
+    await sleep(300);
+  }
+  throw new Error('تعذر فتح صفحة Google Search Console. تأكد من تسجيل الدخول إلى حساب Google.');
 }
 
 async function injectReporter(tabId) {
@@ -558,16 +606,19 @@ async function runReport(runId, tabId, windowId, property, reportType, recordInd
           ? `جارٍ فتح ${routeName}…`
           : `لم تكتمل البيانات بعد؛ جارٍ إعادة محاولة ${routeName} (${attempt}/${MAX_REPORT_ATTEMPTS})…`
       });
+      await logRunEvent(runId, `فتح تقرير ${routeName} لـ ${property.label}.`, 'info');
       await navigateToReport(tabId, targetUrl);
       if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
 
       await setRecord(runId, recordIndex, { detail: `جارٍ انتظار وتحليل بيانات ${routeName}…` });
       const calculation = await runCalculationsInTab(tabId, reportType);
       if (!calculation?.ok) throw new Error(calculation?.error || `تعذر قراءة مقارنة ${routeName}.`);
+      await logRunEvent(runId, `تمت قراءة وحساب مقارنة ${routeName} لـ ${property.label}.`, 'info');
       if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
 
       if (!capture) return { calculation };
       await setRecord(runId, recordIndex, { detail: `جارٍ تثبيت وحفظ لقطة ${routeName} في مكتبة الإكستنشن…` });
+      await logRunEvent(runId, `جارٍ حفظ لقطة ${routeName} داخل مكتبة الإكستنشن.`, 'info');
       await sleep(700);
       const saved = await captureReport(tabId, windowId, property, reportType, calculation.metrics);
       return { calculation, saved };
@@ -590,6 +641,7 @@ async function processRun(runId) {
       if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
       const property = properties[index];
       await setRecord(runId, index, { status: 'running', detail: 'جارٍ بدء الموقع…' });
+      await logRunEvent(runId, `بدء معالجة ${property.label} — الموقع ${index + 1} من ${properties.length}.`, 'info');
 
       try {
         // Calculate first so declining clicks can be filtered before any image is saved.
@@ -608,6 +660,7 @@ async function processRun(runId) {
             performance: { status: 'skipped' },
             generativeAi: { status: 'skipped' }
           });
+          await logRunEvent(runId, `تم تخطي ${property.label}: النقرات أقل من الأسبوع السابق.`, 'warning');
           continue;
         }
 
@@ -628,10 +681,12 @@ async function processRun(runId) {
             await setRecord(runId, index, {
               generativeAi: { status: 'unavailable', error: error.message }
             });
+            await logRunEvent(runId, `تقرير Generative AI غير متاح لـ ${property.label}، تم الاكتفاء بـ Performance.`, 'warning');
           }
         }
 
         await setRecord(runId, index, { status: 'completed', detail: 'اكتمل.' });
+        await logRunEvent(runId, `اكتمل ${property.label} وتم حفظ اللقطات المتاحة في المكتبة.`, 'success');
       } catch (error) {
         if (error.message === '__CANCELLED__') throw error;
         await setRecord(runId, index, {
@@ -640,6 +695,7 @@ async function processRun(runId) {
           error: error.message,
           performance: { status: 'error', error: error.message }
         });
+        await logRunEvent(runId, `تعذر إكمال ${property.label}: ${error.message}`, 'error');
       }
     }
 
@@ -647,17 +703,20 @@ async function processRun(runId) {
       state.status = 'completed';
       state.message = 'اكتمل حفظ جميع التقارير المتاحة داخل مكتبة الإكستنشن.';
       state.cancelRequested = false;
+      appendRunEvent(state, 'اكتمل التشغيل بالكامل. يمكنك مراجعة الصور من مكتبة اللقطات.', 'success');
     });
   } catch (error) {
     if (error.message === '__CANCELLED__') {
       await updateRunState(runId, (state) => {
         state.status = 'cancelled';
         state.message = 'تم إيقاف التشغيل بناءً على طلبك.';
+        appendRunEvent(state, 'تم إيقاف التشغيل بناءً على طلبك.', 'warning');
       });
     } else {
       await updateRunState(runId, (state) => {
         state.status = 'failed';
         state.message = error.message || 'حدث خطأ غير متوقع أثناء التشغيل.';
+        appendRunEvent(state, state.message, 'error');
       });
     }
   } finally {
@@ -698,15 +757,16 @@ async function bootstrapAndProcessRun(runId) {
     await updateRunState(runId, (latest) => {
       latest.message = 'تم بدء التشغيل. جارٍ فتح Google Search Console واستخراج كل الـ Properties…';
       latest.records[0].status = 'running';
-      latest.records[0].detail = 'جارٍ فتح تقرير البداية…';
+      latest.records[0].detail = 'جارٍ فتح صفحة Google Search Console…';
+      appendRunEvent(latest, 'تم استلام أمر التشغيل. جارٍ فتح صفحة Google Search Console.', 'info');
     });
-    await navigateToReport(state.tabId, reportUrl(BOOTSTRAP_RESOURCE_ID, 'performance'));
+    const tab = await navigateToSearchConsoleHome(state.tabId);
     if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
 
     await updateRunState(runId, (latest) => {
       latest.records[0].detail = 'جارٍ قراءة كل الـ Properties من حساب Search Console…';
+      appendRunEvent(latest, 'تم فتح Search Console. جارٍ قراءة قائمة الـ Properties المتاحة.', 'info');
     });
-    const tab = await chrome.tabs.get(state.tabId);
     const discoveredProperties = await discoverPropertiesForTab(tab);
     if (!discoveredProperties.length) throw new Error('لم يتم العثور على أي Property في حساب Search Console المفتوح.');
     if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
@@ -722,6 +782,13 @@ async function bootstrapAndProcessRun(runId) {
       latest.message = state.runMode === 'selected'
         ? `تم اختيار ${properties.length} موقع من القائمة المحددة. جارٍ بدء التشغيل…`
         : `تم استخراج ${discoveredProperties.length} Property واختيار ${properties.length} Domain Property مفضلة. جارٍ بدء التشغيل…`;
+      appendRunEvent(
+        latest,
+        state.runMode === 'selected'
+          ? `تم مطابقة واختيار ${properties.length} موقع من الروابط التي أضفتها.`
+          : `تم استخراج ${discoveredProperties.length} Property بعد إزالة التكرارات واختيار ${properties.length} Domain Property.`,
+        'success'
+      );
     });
     handedToProcessor = true;
     await processRun(runId);
@@ -732,9 +799,11 @@ async function bootstrapAndProcessRun(runId) {
       if (error.message === '__CANCELLED__') {
         latest.status = 'cancelled';
         latest.message = 'تم إيقاف التشغيل بناءً على طلبك.';
+        appendRunEvent(latest, 'تم إيقاف التشغيل أثناء تجهيز قائمة المواقع.', 'warning');
       } else {
         latest.status = 'failed';
         latest.message = error.message || 'تعذر تجهيز تشغيل التقرير.';
+        appendRunEvent(latest, latest.message, 'error');
         if (latest.records[0]) {
           latest.records[0].status = 'error';
           latest.records[0].error = latest.message;
@@ -765,8 +834,7 @@ async function startRun(message) {
   }
   // Validate user-provided links before opening Search Console, so invalid input fails immediately.
   if (runMode === 'selected') requestedProperties.forEach(normaliseProperty);
-  const bootstrapProperty = { resourceId: BOOTSTRAP_RESOURCE_ID, label: displayProperty(BOOTSTRAP_RESOURCE_ID) };
-  const properties = [bootstrapProperty];
+  const properties = [{ resourceId: '', label: 'حساب Google Search Console' }];
 
   let originalZoom = 1;
   try {
@@ -793,6 +861,7 @@ async function startRun(message) {
       includeGenerativeAi: message.options?.includeGenerativeAi !== false
     },
     records: queuedRecords(properties),
+    events: [{ id: `${Date.now()}-start`, at: Date.now(), message: 'تم بدء التشغيل بنجاح. ستظهر المراحل هنا لحظة بلحظة.', type: 'success' }],
     message: 'تم بدء التشغيل. جارٍ فتح Google Search Console تلقائيًا…',
     cancelRequested: false
   };
