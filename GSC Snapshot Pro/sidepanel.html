@@ -61,6 +61,8 @@
 
       <button id="start-run" class="primary" type="button"><span class="button-icon" aria-hidden="true">↗</span> بدء التقرير التلقائي</button>
       <button id="cancel-run" class="danger hidden" type="button">إيقاف التشغيل</button>
+      <button id="reset-run-interface" class="reset-button" type="button">↻ إعادة ضبط الواجهة</button>
+      <p class="reset-hint">يعيد حالة التشغيل والسجل فقط، ولا يحذف أي صور من مكتبة اللقطات.</p>
 
       <section id="run-panel" class="run-panel" aria-live="polite" hidden>
         <div class="run-heading"><span id="run-indicator" class="indicator"></span><strong id="run-status">في الانتظار</strong></div>
@@ -81,7 +83,7 @@
       <section class="library-summary">
         <div><span class="summary-dot"></span><b id="snapshot-count">0</b> لقطة محفوظة داخل الإكستنشن</div>
         <button id="clear-library" class="clear-button" type="button">مسح الكل</button>
-        <small>اختر أي لقطة للمعاينة أو تنزيل نسخة PNG منها.</small>
+        <small>الصور منظمة داخل مجلدات باسم الـ Property، وكل ملف يحمل تاريخ ووقت الحفظ فقط.</small>
       </section>
 
       <div class="library-layout">

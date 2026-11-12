@@ -1,6 +1,5 @@
 const RUN_STORAGE_KEY = 'gscSnapshotProRun';
 const GSC_ORIGIN = 'https://search.google.com';
-const REPORT_ZOOM = 0.8;
 const SEARCH_CONSOLE_HOME_URL = `${GSC_ORIGIN}/search-console`;
 const ROUTE_TIMEOUT_MS = 30000;
 const REPORT_SETTLE_DELAY_MS = 2200;
@@ -158,17 +157,22 @@ function resolveRequestedProperties(availableProperties, rawProperties) {
     byCanonicalKey.set(key, candidates);
   });
 
-  const chosen = new Map();
+  const matched = new Map();
+  const missing = new Map();
   rawProperties.forEach((rawProperty) => {
     const resourceId = normaliseProperty(rawProperty);
     const key = canonicalPropertyKey(resourceId);
     const matchingProperties = byCanonicalKey.get(key) || [];
     const bestMatch = preferDomainProperties(matchingProperties)[0];
-    // If the property selector did not surface this item, keep the explicit user input.
-    const property = bestMatch || { resourceId, label: displayProperty(resourceId) };
-    chosen.set(property.resourceId, property);
+    if (bestMatch) {
+      matched.set(bestMatch.resourceId, bestMatch);
+    } else {
+      // Never open a URL-prefix that is absent from this Google account. It would only
+      // lead to Search Console's "you don't have access" page and block the next site.
+      missing.set(key, { resourceId, label: displayProperty(resourceId), unavailable: true });
+    }
   });
-  return [...chosen.values()];
+  return { matched: [...matched.values()], missing: [...missing.values()] };
 }
 
 function normaliseProperty(rawProperty) {
@@ -215,10 +219,14 @@ function safeFileSegment(value) {
   return cleaned || 'site';
 }
 
-function reportFileName(property, reportType) {
-  const day = new Date().toISOString().slice(0, 10);
-  const reportName = reportType === 'generative-ai' ? 'generative-ai' : 'performance';
-  return `GSC Snapshot Pro/${safeFileSegment(property.label)}/${reportName}-week-over-week-${day}.png`;
+function snapshotDateFileName(createdAt) {
+  // The library treats every Property as a folder and every capture as a date-named file.
+  // Including the time keeps two report captures made on the same day from overwriting each other.
+  return new Date(createdAt).toISOString().replace(/[:.]/g, '-').replace('T', '_').replace('Z', '') + '.png';
+}
+
+function reportFileName(property, createdAt) {
+  return `GSC Snapshot Pro/${safeFileSegment(property.label)}/${snapshotDateFileName(createdAt)}`;
 }
 
 async function getRunState() {
@@ -309,6 +317,19 @@ async function discoverPropertiesForTab(tab) {
           return null;
         }
       };
+      const resourceFromPropertyText = (value) => {
+        const text = cleanText(value);
+        const domainMatch = text.match(/\bsc-domain:[a-z0-9.-]+/i);
+        if (domainMatch) return domainMatch[0];
+        const urlMatch = text.match(/https?:\/\/[^\s<>"']+/i);
+        if (!urlMatch) return null;
+        try {
+          const url = new URL(urlMatch[0]);
+          return `${url.origin}/`;
+        } catch {
+          return null;
+        }
+      };
       const scan = (root = document) => {
         root.querySelectorAll('[data-resource-id]').forEach((element) => {
           add(element.getAttribute('data-resource-id'), element.getAttribute('aria-label') || element.textContent);
@@ -316,6 +337,13 @@ async function discoverPropertiesForTab(tab) {
         root.querySelectorAll('a[href*="resource_id="], [data-href*="resource_id="]').forEach((element) => {
           const resourceId = resourceFromUrl(element.href || element.getAttribute('data-href'));
           add(resourceId, element.getAttribute('aria-label') || element.textContent);
+        });
+        // Some GSC releases expose the property only as the text in a menu item.
+        // Read those entries as well instead of assuming every item has an href.
+        root.querySelectorAll('[role="menuitem"], [role="option"], [role="treeitem"]').forEach((element) => {
+          const label = element.getAttribute('aria-label') || element.textContent;
+          const resourceId = resourceFromPropertyText(label);
+          add(resourceId, label);
         });
       };
       const isVisible = (element) => {
@@ -326,7 +354,7 @@ async function discoverPropertiesForTab(tab) {
         ? decodeURIComponent(currentResourceId).replace(/^sc-domain:/, '').toLowerCase()
         : '';
       // This stable Search Console container is more reliable than guessing from the page's URL-inspection input.
-      const selectorControl = document.querySelector('#resource-selector-container [role="button"][aria-haspopup="menu"]');
+      const selectorControl = document.querySelector('#resource-selector-container [role="button"], #resource-selector-container button, #resource-selector-container [aria-haspopup]');
       const propertyControl = selectorControl || [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], button, [role="button"]')]
         .filter(isVisible)
         .map((element) => {
@@ -344,7 +372,6 @@ async function discoverPropertiesForTab(tab) {
         .filter(Boolean)
         .sort((first, second) => second.score - first.score)[0]?.element;
 
-      scan();
       let menuWasOpened = false;
       if (propertyControl) {
         propertyControl.click();
@@ -398,13 +425,25 @@ async function discoverPropertiesForTab(tab) {
   });
 
   const found = result?.result || [];
-  const all = new Map(current ? [[current.resourceId, current]] : []);
+  const all = new Map();
   found.forEach((property) => {
     if (property?.resourceId) all.set(property.resourceId, {
       resourceId: property.resourceId,
       label: property.label || displayProperty(property.resourceId)
     });
   });
+
+  // Search Console can redirect its landing page to the last Property that was viewed.
+  // Only use that fallback when the selector yielded nothing and the page is not an
+  // access-denied page. Never insert an inaccessible current URL into an all-sites run.
+  if (!all.size && current) {
+    const [accessCheck] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => !/you don't have access|you do not have access|ليس لديك صلاحية/i.test(document.body?.innerText || '')
+    });
+    if (accessCheck?.result) all.set(current.resourceId, current);
+  }
+
   return [...all.values()].sort((first, second) => first.label.localeCompare(second.label));
 }
 
@@ -426,9 +465,39 @@ function isExpectedReportRoute(currentUrl, targetUrl) {
   }
 }
 
-async function waitForReportRoute(tabId, targetUrl) {
+async function throwIfCancelled(runId) {
+  if (runId && await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+}
+
+async function sleepWithCancellation(runId, milliseconds) {
+  const until = Date.now() + milliseconds;
+  while (Date.now() < until) {
+    await throwIfCancelled(runId);
+    await sleep(Math.min(250, Math.max(1, until - Date.now())));
+  }
+  await throwIfCancelled(runId);
+}
+
+async function awaitWithCancellation(promise, runId) {
+  if (!runId) return promise;
+  let settled = false;
+  const cancellation = (async () => {
+    while (!settled) {
+      await throwIfCancelled(runId);
+      await sleep(250);
+    }
+  })();
+  try {
+    return await Promise.race([promise, cancellation]);
+  } finally {
+    settled = true;
+  }
+}
+
+async function waitForReportRoute(tabId, targetUrl, runId) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
+    await throwIfCancelled(runId);
     let tab;
     try {
       tab = await chrome.tabs.get(tabId);
@@ -439,50 +508,54 @@ async function waitForReportRoute(tabId, targetUrl) {
     // Search Console is a single-page app. Moving between reports often changes the URL
     // without emitting a new "complete" tab-loading event, which caused the old 60s timeout.
     if (isExpectedReportRoute(tab.url, targetUrl)) return;
-    await sleep(300);
+    await sleepWithCancellation(runId, 300);
   }
   throw new Error('لم يتم فتح رابط تقرير Google Search Console. تأكد أن حسابك لديه صلاحية للموقع وأنك ما زلت مسجل الدخول.');
 }
 
-async function navigateToReport(tabId, url) {
+async function navigateToReport(tabId, url, runId) {
+  await throwIfCancelled(runId);
   await chrome.tabs.update(tabId, { url, active: true });
-  await waitForReportRoute(tabId, url);
+  await waitForReportRoute(tabId, url, runId);
   // Let the SPA finish replacing the old report card before reading its metrics.
-  await sleep(REPORT_SETTLE_DELAY_MS);
+  await sleepWithCancellation(runId, REPORT_SETTLE_DELAY_MS);
 }
 
-async function waitForPropertySelector(tabId) {
+async function waitForPropertySelector(tabId, runId) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
+    await throwIfCancelled(runId);
     try {
       const [result] = await chrome.scripting.executeScript({
         target: { tabId },
-        func: () => Boolean(document.querySelector('#resource-selector-container [role="button"][aria-haspopup="menu"]'))
+        func: () => Boolean(document.querySelector('#resource-selector-container [role="button"], #resource-selector-container button, #resource-selector-container [aria-haspopup]'))
       });
       if (result?.result) return;
     } catch {
       throw new Error('تعذر الوصول إلى واجهة Google Search Console.');
     }
-    await sleep(400);
+    await sleepWithCancellation(runId, 400);
   }
   throw new Error('لم تظهر قائمة الـ Properties في Search Console. تأكد من تسجيل الدخول وأن الحساب لديه مواقع مضافة.');
 }
 
-async function navigateToSearchConsoleHome(tabId) {
+async function navigateToSearchConsoleHome(tabId, runId) {
+  await throwIfCancelled(runId);
   await chrome.tabs.update(tabId, { url: SEARCH_CONSOLE_HOME_URL, active: true });
   const startedAt = Date.now();
   while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
+    await throwIfCancelled(runId);
     try {
       const tab = await chrome.tabs.get(tabId);
       if (isGscUrl(tab.url)) {
-        await sleep(REPORT_SETTLE_DELAY_MS);
-        await waitForPropertySelector(tabId);
+        await sleepWithCancellation(runId, REPORT_SETTLE_DELAY_MS);
+        await waitForPropertySelector(tabId, runId);
         return chrome.tabs.get(tabId);
       }
     } catch {
       throw new Error('تم إغلاق تبويب Google Search Console أثناء التشغيل.');
     }
-    await sleep(300);
+    await sleepWithCancellation(runId, 300);
   }
   throw new Error('تعذر فتح صفحة Google Search Console. تأكد من تسجيل الدخول إلى حساب Google.');
 }
@@ -565,14 +638,15 @@ async function captureReport(tabId, windowId, property, reportType, metrics = nu
     console.warn('Could not crop Search Console screenshot', error);
   }
 
-  const filename = reportFileName(property, reportType);
+  const createdAt = Date.now();
+  const filename = reportFileName(property, createdAt);
   const snapshot = await saveSnapshot({
     propertyLabel: property.label,
     resourceId: property.resourceId,
     reportType,
     metrics,
     filename,
-    createdAt: Date.now(),
+    createdAt,
     imageData: image
   });
   chrome.runtime.sendMessage({ type: 'SNAPSHOT_LIBRARY_UPDATED' }).catch(() => {
@@ -607,19 +681,20 @@ async function runReport(runId, tabId, windowId, property, reportType, recordInd
           : `لم تكتمل البيانات بعد؛ جارٍ إعادة محاولة ${routeName} (${attempt}/${MAX_REPORT_ATTEMPTS})…`
       });
       await logRunEvent(runId, `فتح تقرير ${routeName} لـ ${property.label}.`, 'info');
-      await navigateToReport(tabId, targetUrl);
-      if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+      await navigateToReport(tabId, targetUrl, runId);
+      await throwIfCancelled(runId);
 
       await setRecord(runId, recordIndex, { detail: `جارٍ انتظار وتحليل بيانات ${routeName}…` });
-      const calculation = await runCalculationsInTab(tabId, reportType);
+      const calculation = await awaitWithCancellation(runCalculationsInTab(tabId, reportType), runId);
       if (!calculation?.ok) throw new Error(calculation?.error || `تعذر قراءة مقارنة ${routeName}.`);
       await logRunEvent(runId, `تمت قراءة وحساب مقارنة ${routeName} لـ ${property.label}.`, 'info');
-      if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+      await throwIfCancelled(runId);
 
       if (!capture) return { calculation };
       await setRecord(runId, recordIndex, { detail: `جارٍ تثبيت وحفظ لقطة ${routeName} في مكتبة الإكستنشن…` });
       await logRunEvent(runId, `جارٍ حفظ لقطة ${routeName} داخل مكتبة الإكستنشن.`, 'info');
-      await sleep(700);
+      await sleepWithCancellation(runId, 700);
+      await throwIfCancelled(runId);
       const saved = await captureReport(tabId, windowId, property, reportType, calculation.metrics);
       return { calculation, saved };
     } catch (error) {
@@ -631,15 +706,30 @@ async function runReport(runId, tabId, windowId, property, reportType, recordInd
   throw new Error(lastError?.message || `تعذر تحميل تقرير ${routeName}.`);
 }
 
+function isUnavailablePropertyError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return /you don't have access|you do not have access|not available|no data|صلاحية|غير متاح|لا توجد بيانات|property/.test(message);
+}
+
 async function processRun(runId) {
   let initialState = await getRunState();
   if (!initialState || initialState.id !== runId) return;
 
-  const { tabId, windowId, properties, options, originalZoom } = initialState;
+  const { tabId, windowId, properties, options } = initialState;
   try {
     for (let index = 0; index < properties.length; index += 1) {
       if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
       const property = properties[index];
+      if (property.unavailable) {
+        await setRecord(runId, index, {
+          status: 'skipped',
+          detail: 'تم التخطي: هذا الـ Property غير موجود أو غير متاح في حساب Google Search Console الحالي.',
+          performance: { status: 'skipped' },
+          generativeAi: { status: 'skipped' }
+        });
+        await logRunEvent(runId, `تم تخطي ${property.label}: غير موجود في حساب Search Console الحالي.`, 'warning');
+        continue;
+      }
       await setRecord(runId, index, { status: 'running', detail: 'جارٍ بدء الموقع…' });
       await logRunEvent(runId, `بدء معالجة ${property.label} — الموقع ${index + 1} من ${properties.length}.`, 'info');
 
@@ -665,7 +755,9 @@ async function processRun(runId) {
         }
 
         await setRecord(runId, index, { detail: 'جارٍ حفظ لقطة Performance في مكتبة الإكستنشن…' });
+        await throwIfCancelled(runId);
         const performanceSaved = await captureReport(tabId, windowId, property, 'performance', performance.calculation.metrics);
+        await throwIfCancelled(runId);
         await setRecord(runId, index, {
           performance: { status: 'captured', ...performanceSaved }
         });
@@ -689,13 +781,21 @@ async function processRun(runId) {
         await logRunEvent(runId, `اكتمل ${property.label} وتم حفظ اللقطات المتاحة في المكتبة.`, 'success');
       } catch (error) {
         if (error.message === '__CANCELLED__') throw error;
+        const unavailable = isUnavailablePropertyError(error);
         await setRecord(runId, index, {
-          status: 'error',
-          detail: '',
+          status: unavailable ? 'skipped' : 'error',
+          detail: unavailable ? 'تم التخطي: هذا الـ Property غير متاح في الحساب الحالي أو لا يملك بيانات قابلة للمقارنة.' : '',
           error: error.message,
-          performance: { status: 'error', error: error.message }
+          performance: { status: unavailable ? 'skipped' : 'error', error: error.message },
+          generativeAi: unavailable ? { status: 'skipped' } : { status: 'queued' }
         });
-        await logRunEvent(runId, `تعذر إكمال ${property.label}: ${error.message}`, 'error');
+        await logRunEvent(
+          runId,
+          unavailable
+            ? `تم تخطي ${property.label}: غير متاح في الحساب الحالي أو لا توجد بيانات قابلة للمقارنة.`
+            : `تعذر إكمال ${property.label}: ${error.message}`,
+          unavailable ? 'warning' : 'error'
+        );
       }
     }
 
@@ -719,14 +819,6 @@ async function processRun(runId) {
         appendRunEvent(state, state.message, 'error');
       });
     }
-  } finally {
-    if (Number.isFinite(originalZoom)) {
-      try {
-        await chrome.tabs.setZoom(tabId, originalZoom);
-      } catch {
-        // The tab may have been closed. The run status already communicates that failure.
-      }
-    }
   }
 }
 
@@ -739,17 +831,7 @@ function queuedRecords(properties) {
   }));
 }
 
-async function restoreRunZoom(state) {
-  if (!Number.isFinite(state?.originalZoom)) return;
-  try {
-    await chrome.tabs.setZoom(state.tabId, state.originalZoom);
-  } catch {
-    // The bootstrap tab may have been closed before the run could start.
-  }
-}
-
 async function bootstrapAndProcessRun(runId) {
-  let handedToProcessor = false;
   let state = await getRunState();
   if (!state || state.id !== runId) return;
 
@@ -760,37 +842,40 @@ async function bootstrapAndProcessRun(runId) {
       latest.records[0].detail = 'جارٍ فتح صفحة Google Search Console…';
       appendRunEvent(latest, 'تم استلام أمر التشغيل. جارٍ فتح صفحة Google Search Console.', 'info');
     });
-    const tab = await navigateToSearchConsoleHome(state.tabId);
-    if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+    const tab = await navigateToSearchConsoleHome(state.tabId, runId);
+    await throwIfCancelled(runId);
 
     await updateRunState(runId, (latest) => {
       latest.records[0].detail = 'جارٍ قراءة كل الـ Properties من حساب Search Console…';
       appendRunEvent(latest, 'تم فتح Search Console. جارٍ قراءة قائمة الـ Properties المتاحة.', 'info');
     });
-    const discoveredProperties = await discoverPropertiesForTab(tab);
-    if (!discoveredProperties.length) throw new Error('لم يتم العثور على أي Property في حساب Search Console المفتوح.');
-    if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
+    const discoveredProperties = await awaitWithCancellation(discoverPropertiesForTab(tab), runId);
+    await throwIfCancelled(runId);
 
-    const properties = state.runMode === 'selected'
+    if (!discoveredProperties.length && state.runMode === 'all') {
+      throw new Error('لم يتم العثور على أي Property يمكن الوصول إليه في حساب Search Console المفتوح.');
+    }
+
+    const selection = state.runMode === 'selected'
       ? resolveRequestedProperties(discoveredProperties, state.requestedProperties)
-      : preferDomainProperties(discoveredProperties);
+      : { matched: preferDomainProperties(discoveredProperties), missing: [] };
+    const properties = [...selection.matched, ...selection.missing];
     if (!properties.length) throw new Error('لم يتم العثور على Properties مطابقة للقائمة المطلوبة.');
 
     await updateRunState(runId, (latest) => {
       latest.properties = properties;
       latest.records = queuedRecords(properties);
       latest.message = state.runMode === 'selected'
-        ? `تم اختيار ${properties.length} موقع من القائمة المحددة. جارٍ بدء التشغيل…`
+        ? `تم العثور على ${selection.matched.length} موقع، وسيتم تخطي ${selection.missing.length} موقع غير متاح ثم بدء التشغيل.`
         : `تم استخراج ${discoveredProperties.length} Property واختيار ${properties.length} Domain Property مفضلة. جارٍ بدء التشغيل…`;
       appendRunEvent(
         latest,
         state.runMode === 'selected'
-          ? `تم مطابقة واختيار ${properties.length} موقع من الروابط التي أضفتها.`
+          ? `تمت مطابقة ${selection.matched.length} موقع. سيتم تخطي ${selection.missing.length} موقع غير موجود في هذا الحساب.`
           : `تم استخراج ${discoveredProperties.length} Property بعد إزالة التكرارات واختيار ${properties.length} Domain Property.`,
-        'success'
+        selection.missing.length ? 'warning' : 'success'
       );
     });
-    handedToProcessor = true;
     await processRun(runId);
   } catch (error) {
     state = await getRunState();
@@ -811,14 +896,14 @@ async function bootstrapAndProcessRun(runId) {
         }
       }
     });
-  } finally {
-    if (!handedToProcessor) await restoreRunZoom(state);
   }
 }
 
 async function startRun(message) {
   const existing = await getRunState();
-  if (existing?.status === 'running') throw new Error('يوجد تقرير قيد التشغيل بالفعل.');
+  if (existing?.status === 'running' || existing?.status === 'cancelling') {
+    throw new Error('يوجد تقرير قيد التشغيل بالفعل. أوقفه أو أعد ضبط الواجهة أولًا.');
+  }
 
   let tab = await getActiveTab();
   // If the side panel was opened away from GSC, protect the current page by creating
@@ -836,15 +921,8 @@ async function startRun(message) {
   if (runMode === 'selected') requestedProperties.forEach(normaliseProperty);
   const properties = [{ resourceId: '', label: 'حساب Google Search Console' }];
 
-  let originalZoom = 1;
-  try {
-    originalZoom = await chrome.tabs.getZoom(tab.id);
-    await chrome.tabs.setZoomSettings(tab.id, { mode: 'automatic', scope: 'per-tab' });
-    await chrome.tabs.setZoom(tab.id, REPORT_ZOOM);
-  } catch {
-    // Zoom is only to fit the report card into one capture. The report can still run at the existing zoom.
-  }
-
+  // Respect the browser zoom selected by the user. Screenshot cropping already adapts
+  // to the viewport scale, so changing Chrome's zoom is unnecessary and distracting.
   const automaticDiscovery = true;
   const state = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -852,7 +930,6 @@ async function startRun(message) {
     startedAt: Date.now(),
     tabId: tab.id,
     windowId: tab.windowId,
-    originalZoom,
     runMode,
     requestedProperties,
     properties,
@@ -878,16 +955,25 @@ async function startRun(message) {
   return { started: true, state };
 }
 
+async function resetRunInterface() {
+  // Run status and log live in chrome.storage.local. Snapshot images are held in
+  // IndexedDB, so this never touches the screenshot library.
+  await chrome.storage.local.remove(RUN_STORAGE_KEY);
+  return { reset: true };
+}
+
 async function exportSnapshot(snapshotId) {
   const snapshot = await getSnapshot(snapshotId);
   if (!snapshot?.imageData) throw new Error('الصورة المطلوبة غير موجودة في مكتبة الإكستنشن.');
+  // Rebuild the path on export so old library entries also follow the folder/date layout.
+  const filename = reportFileName({ label: snapshot.propertyLabel }, snapshot.createdAt);
   const downloadId = await chrome.downloads.download({
     url: snapshot.imageData,
-    filename: snapshot.filename,
+    filename,
     conflictAction: 'uniquify',
     saveAs: false
   });
-  return { downloadId, filename: snapshot.filename };
+  return { downloadId, filename };
 }
 
 function configureSidePanel() {
@@ -923,12 +1009,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return { count: 0 };
     },
     EXPORT_SNAPSHOT: async () => exportSnapshot(message.snapshotId),
+    RESET_RUN_INTERFACE: resetRunInterface,
     START_RUN: () => startRun(message),
     CANCEL_RUN: async () => {
       const state = await getRunState();
-      if (state?.status === 'running') {
+      if (state?.status === 'running' || state?.status === 'cancelling') {
         state.cancelRequested = true;
-        state.message = 'سيتم الإيقاف بعد المرحلة الحالية…';
+        state.status = 'cancelling';
+        state.message = 'جارٍ إيقاف التشغيل الآن…';
+        appendRunEvent(state, 'تم استلام طلب الإيقاف. لن يتم فتح أو حفظ أي تقرير جديد.', 'warning');
         await saveRunState(state);
       }
       return { state };

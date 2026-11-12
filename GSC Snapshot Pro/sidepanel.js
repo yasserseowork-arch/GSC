@@ -3,6 +3,7 @@ const $ = (selector) => document.querySelector(selector);
 let pollingTimer = null;
 let snapshots = [];
 let selectedSnapshotId = null;
+let expandedFolders = new Set();
 let domReady = false;
 let runMode = 'all';
 
@@ -54,25 +55,12 @@ function recordSummary(record) {
 function renderRunState(state) {
   const panel = $('#run-panel');
   const status = state?.status;
+  const isActive = status === 'running' || status === 'cancelling';
   panel.hidden = !status;
-  $('#cancel-run').classList.toggle('hidden', status !== 'running');
-  $('#start-run').disabled = status === 'running';
-  if (!status) return;
-
-  const statusLabels = { running: 'جارٍ إنشاء التقارير', completed: 'اكتمل إنشاء التقارير', cancelled: 'تم إيقاف التشغيل', failed: 'توقف التشغيل بسبب خطأ' };
-  $('#run-status').textContent = statusLabels[status] || status;
-  $('#run-indicator').className = `indicator ${status}`;
-  const current = state.records?.find((item) => item.status === 'running');
-  $('#run-detail').textContent = current ? `${current.label} — ${current.detail || 'جارٍ تحميل تقرير Google Search Console…'}` : state.message || '';
-
-  const list = $('#run-records');
-  list.replaceChildren();
-  (state.records || []).forEach((record) => {
-    const item = document.createElement('li');
-    item.className = record.status || '';
-    item.textContent = recordSummary(record);
-    list.appendChild(item);
-  });
+  $('#cancel-run').classList.toggle('hidden', !isActive);
+  $('#cancel-run').disabled = status === 'cancelling';
+  $('#cancel-run').textContent = status === 'cancelling' ? 'جارٍ الإيقاف…' : 'إيقاف التشغيل';
+  $('#start-run').disabled = isActive;
 
   const events = state?.events || [];
   const activityPanel = $('#activity-panel');
@@ -90,6 +78,28 @@ function renderRunState(state) {
     item.append(text, time);
     activityLog.appendChild(item);
   });
+
+  if (!status) return;
+  const statusLabels = {
+    running: 'جارٍ إنشاء التقارير',
+    cancelling: 'جارٍ إيقاف التشغيل',
+    completed: 'اكتمل إنشاء التقارير',
+    cancelled: 'تم إيقاف التشغيل',
+    failed: 'توقف التشغيل بسبب خطأ'
+  };
+  $('#run-status').textContent = statusLabels[status] || status;
+  $('#run-indicator').className = `indicator ${status}`;
+  const current = state.records?.find((item) => item.status === 'running');
+  $('#run-detail').textContent = current ? `${current.label} — ${current.detail || 'جارٍ تحميل تقرير Google Search Console…'}` : state.message || '';
+
+  const list = $('#run-records');
+  list.replaceChildren();
+  (state.records || []).forEach((record) => {
+    const item = document.createElement('li');
+    item.className = record.status || '';
+    item.textContent = recordSummary(record);
+    list.appendChild(item);
+  });
 }
 
 async function refreshState() {
@@ -98,7 +108,7 @@ async function refreshState() {
     if (response?.error) throw new Error(response.error);
     const state = response?.state;
     renderRunState(state);
-    if (state?.status === 'running') startPolling();
+    if (state?.status === 'running' || state?.status === 'cancelling') startPolling();
     else {
       stopPolling();
       refreshSnapshotSummary();
@@ -142,8 +152,6 @@ async function startRun() {
   } catch (error) {
     setRunMessage(error.message);
     await refreshState();
-  } finally {
-    button.disabled = false;
   }
 }
 
@@ -151,9 +159,35 @@ async function cancelRun() {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'CANCEL_RUN' });
     if (response?.error) throw new Error(response.error);
-    await refreshState();
+    renderRunState(response?.state || null);
+    startPolling();
   } catch (error) {
     setRunMessage(error.message);
+  }
+}
+
+async function resetRunInterface() {
+  const resetButton = $('#reset-run-interface');
+  const stateResponse = await chrome.runtime.sendMessage({ type: 'GET_RUN_STATE' });
+  const isActive = stateResponse?.state?.status === 'running' || stateResponse?.state?.status === 'cancelling';
+  const warning = isActive
+    ? 'سيتم إيقاف التشغيل الحالي ومسح حالة الواجهة والسجل فقط. الصور المحفوظة لن تُحذف. هل تريد المتابعة؟'
+    : 'سيتم مسح حالة التشغيل والسجل من الواجهة فقط. الصور المحفوظة لن تُحذف. هل تريد المتابعة؟';
+  if (!window.confirm(warning)) return;
+
+  resetButton.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'RESET_RUN_INTERFACE' });
+    if (response?.error) throw new Error(response.error);
+    stopPolling();
+    $('#selected-sites').value = '';
+    setRunMode('all');
+    renderRunState(null);
+    setRunMessage('تمت إعادة ضبط واجهة التشغيل والسجل. مكتبة الصور كما هي.', 'success');
+  } catch (error) {
+    setRunMessage(error.message);
+  } finally {
+    resetButton.disabled = false;
   }
 }
 
@@ -170,6 +204,16 @@ function clickChange(metrics) {
   return clicks && typeof clicks.change === 'number' ? clicks.change : null;
 }
 
+function snapshotFolderKey(snapshot) {
+  return snapshot.resourceId || snapshot.propertyLabel || 'unknown-property';
+}
+
+function formatFileDate(timestamp) {
+  const date = new Date(timestamp);
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+}
+
 function renderSnapshotList() {
   const list = $('#snapshot-list');
   $('#library-count').textContent = String(snapshots.length);
@@ -184,23 +228,65 @@ function renderSnapshotList() {
     return;
   }
 
+  const folders = new Map();
   snapshots.forEach((snapshot) => {
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = `snapshot-row ${snapshot.reportType === 'generative-ai' ? 'ai' : ''}${snapshot.id === selectedSnapshotId ? ' active' : ''}`;
-    const type = document.createElement('span');
-    type.className = 'row-type';
-    type.textContent = reportLabel(snapshot.reportType);
-    const property = document.createElement('strong');
-    property.className = 'row-property';
-    property.textContent = snapshot.propertyLabel;
-    const date = document.createElement('time');
-    date.className = 'row-date';
-    date.textContent = formatDate(snapshot.createdAt);
-    row.append(type, property, date);
-    row.addEventListener('click', () => selectSnapshot(snapshot.id));
-    list.appendChild(row);
+    const key = snapshotFolderKey(snapshot);
+    const folder = folders.get(key) || { key, label: snapshot.propertyLabel, snapshots: [] };
+    folder.snapshots.push(snapshot);
+    folders.set(key, folder);
   });
+
+  const selectedFolder = snapshots.find((snapshot) => snapshot.id === selectedSnapshotId);
+  if (selectedFolder) expandedFolders.add(snapshotFolderKey(selectedFolder));
+
+  [...folders.values()]
+    .sort((first, second) => second.snapshots[0].createdAt - first.snapshots[0].createdAt)
+    .forEach((folder) => {
+      const folderElement = document.createElement('section');
+      folderElement.className = 'snapshot-folder';
+      const isExpanded = expandedFolders.has(folder.key);
+
+      const header = document.createElement('button');
+      header.type = 'button';
+      header.className = `folder-header${isExpanded ? ' open' : ''}`;
+      header.setAttribute('aria-expanded', String(isExpanded));
+      const icon = document.createElement('span');
+      icon.className = 'folder-icon';
+      icon.textContent = isExpanded ? '▾' : '▸';
+      const label = document.createElement('strong');
+      label.className = 'folder-label';
+      label.textContent = folder.label;
+      const count = document.createElement('small');
+      count.textContent = String(folder.snapshots.length);
+      header.append(icon, label, count);
+      header.addEventListener('click', () => {
+        if (expandedFolders.has(folder.key)) expandedFolders.delete(folder.key);
+        else expandedFolders.add(folder.key);
+        renderSnapshotList();
+      });
+
+      const files = document.createElement('div');
+      files.className = 'folder-files';
+      files.hidden = !isExpanded;
+      folder.snapshots.forEach((snapshot) => {
+        const file = document.createElement('button');
+        file.type = 'button';
+        file.className = `snapshot-file${snapshot.id === selectedSnapshotId ? ' active' : ''}`;
+        file.title = reportLabel(snapshot.reportType);
+        const fileIcon = document.createElement('span');
+        fileIcon.className = `file-icon${snapshot.reportType === 'generative-ai' ? ' ai' : ''}`;
+        fileIcon.textContent = '▧';
+        const filename = document.createElement('time');
+        filename.className = 'file-date';
+        filename.textContent = formatFileDate(snapshot.createdAt);
+        file.append(fileIcon, filename);
+        file.addEventListener('click', () => selectSnapshot(snapshot.id));
+        files.appendChild(file);
+      });
+
+      folderElement.append(header, files);
+      list.appendChild(folderElement);
+    });
 }
 
 function resetPreview() {
@@ -314,6 +400,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('#mode-selected').addEventListener('click', () => setRunMode('selected'));
   $('#start-run').addEventListener('click', startRun);
   $('#cancel-run').addEventListener('click', cancelRun);
+  $('#reset-run-interface').addEventListener('click', safelyRun(resetRunInterface));
   $('#export-snapshot').addEventListener('click', safelyRun(exportSelectedSnapshot));
   $('#delete-snapshot').addEventListener('click', safelyRun(deleteSelectedSnapshot));
   $('#clear-library').addEventListener('click', safelyRun(clearLibrary));
