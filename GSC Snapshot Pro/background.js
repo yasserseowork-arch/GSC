@@ -145,7 +145,10 @@ function preferDomainProperties(properties) {
       preferred.set(key, property);
     }
   });
-  return [...preferred.values()].sort((first, second) => first.label.localeCompare(second.label));
+  // Preserve the Property selector's top-to-bottom order. The first visible site in
+  // Search Console should be the first site processed, while still preferring Domain
+  // Properties whenever URL-prefix and Domain entries represent the same website.
+  return [...preferred.values()];
 }
 
 function resolveRequestedProperties(availableProperties, rawProperties) {
@@ -474,7 +477,7 @@ async function discoverPropertiesForTab(tab) {
   // Do not fall back to the URL currently open in Search Console. Google often redirects
   // its home page to a remembered Property, which is not evidence that it is the first
   // or an accessible Property in this account.
-  return [...all.values()].sort((first, second) => first.label.localeCompare(second.label));
+  return [...all.values()];
 }
 
 async function discoverProperties() {
