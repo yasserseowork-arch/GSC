@@ -161,22 +161,30 @@ function resolveRequestedProperties(availableProperties, rawProperties) {
     byCanonicalKey.set(key, candidates);
   });
 
-  const matched = new Map();
-  const missing = new Map();
+  const properties = [];
+  const seenKeys = new Set();
+  let matchedCount = 0;
+  let missingCount = 0;
   rawProperties.forEach((rawProperty) => {
     const resourceId = normaliseProperty(rawProperty);
     const key = canonicalPropertyKey(resourceId);
+    // Keep the first line the user entered for every website, exactly in its list order.
+    if (seenKeys.has(key)) return;
+    seenKeys.add(key);
+
     const matchingProperties = byCanonicalKey.get(key) || [];
     const bestMatch = preferDomainProperties(matchingProperties)[0];
     if (bestMatch) {
-      matched.set(bestMatch.resourceId, bestMatch);
+      properties.push(bestMatch);
+      matchedCount += 1;
     } else {
-      // Never open a URL-prefix that is absent from this Google account. It would only
-      // lead to Search Console's "you don't have access" page and block the next site.
-      missing.set(key, { resourceId, label: displayProperty(resourceId), unavailable: true });
+      // This record is deliberately kept in its original slot. processRun marks it as
+      // skipped without navigating to it, then proceeds immediately to the next line.
+      properties.push({ resourceId, label: displayProperty(resourceId), unavailable: true });
+      missingCount += 1;
     }
   });
-  return { matched: [...matched.values()], missing: [...missing.values()] };
+  return { properties, matchedCount, missingCount };
 }
 
 function normaliseProperty(rawProperty) {
@@ -681,9 +689,27 @@ async function cropScreenshot(dataUrl, crop) {
   }
 }
 
+async function captureVisibleTabFallback(tabId) {
+  // This branch is only used when another DevTools client prevents debugger attachment.
+  // The regular path below captures entirely in the background.
+  const reportTab = await chrome.tabs.get(tabId);
+  const [previousActiveTab] = await chrome.tabs.query({ active: true, windowId: reportTab.windowId });
+  const mustSwitch = previousActiveTab?.id !== tabId;
+  if (mustSwitch) await chrome.tabs.update(tabId, { active: true });
+  try {
+    return await chrome.tabs.captureVisibleTab(reportTab.windowId, { format: 'png' });
+  } finally {
+    const [currentActiveTab] = await chrome.tabs.query({ active: true, windowId: reportTab.windowId });
+    if (mustSwitch && currentActiveTab?.id === tabId && previousActiveTab?.id) {
+      await chrome.tabs.update(previousActiveTab.id, { active: true }).catch(() => {});
+    }
+  }
+}
+
 async function captureBackgroundTab(tabId) {
   const target = { tabId };
   let attached = false;
+  let debuggerError = null;
   try {
     // captureVisibleTab only works for the foreground tab and loses its activeTab grant
     // after navigation. CDP captures this specific GSC tab while the user works elsewhere.
@@ -697,7 +723,7 @@ async function captureBackgroundTab(tabId) {
     if (!result?.data) throw new Error('لم يستجب المتصفح ببيانات الصورة.');
     return `data:image/png;base64,${result.data}`;
   } catch (error) {
-    throw new Error(`تعذر التقاط صورة من تبويب Search Console في الخلفية: ${error.message || error}`);
+    debuggerError = error;
   } finally {
     if (attached) {
       try {
@@ -706,6 +732,12 @@ async function captureBackgroundTab(tabId) {
         // Closing the tab or detaching elsewhere should not hide the original failure.
       }
     }
+  }
+
+  try {
+    return await captureVisibleTabFallback(tabId);
+  } catch (fallbackError) {
+    throw new Error(`تعذر التقاط صورة التقرير: ${debuggerError?.message || debuggerError || 'تعذر استخدام الالتقاط في الخلفية'}؛ ${fallbackError.message || fallbackError}`);
   }
 }
 
@@ -945,22 +977,26 @@ async function bootstrapAndProcessRun(runId) {
 
     const selection = state.runMode === 'selected'
       ? resolveRequestedProperties(discoveredProperties, state.requestedProperties)
-      : { matched: preferDomainProperties(discoveredProperties), missing: [] };
-    const properties = [...selection.matched, ...selection.missing];
+      : {
+        properties: preferDomainProperties(discoveredProperties),
+        matchedCount: discoveredProperties.length,
+        missingCount: 0
+      };
+    const properties = selection.properties;
     if (!properties.length) throw new Error('لم يتم العثور على Properties مطابقة للقائمة المطلوبة.');
 
     await updateRunState(runId, (latest) => {
       latest.properties = properties;
       latest.records = queuedRecords(properties);
       latest.message = state.runMode === 'selected'
-        ? `تم العثور على ${selection.matched.length} موقع، وسيتم تخطي ${selection.missing.length} موقع غير متاح ثم بدء التشغيل.`
+        ? `سيتم تنفيذ ${properties.length} سطر بنفس الترتيب الذي أدخلته: ${selection.matchedCount} موجود و${selection.missingCount} سيتم تخطيه.`
         : `تم استخراج ${discoveredProperties.length} Property واختيار ${properties.length} Domain Property مفضلة. جارٍ بدء التشغيل…`;
       appendRunEvent(
         latest,
         state.runMode === 'selected'
-          ? `تمت مطابقة ${selection.matched.length} موقع. سيتم تخطي ${selection.missing.length} موقع غير موجود في هذا الحساب.`
+          ? `تم ترتيب المواقع كما أدخلتها: ${selection.matchedCount} Property متاح و${selection.missingCount} سيتم تخطيه دون فتحه.`
           : `تم استخراج ${discoveredProperties.length} Property بعد إزالة التكرارات واختيار ${properties.length} Domain Property.`,
-        selection.missing.length ? 'warning' : 'success'
+        selection.missingCount ? 'warning' : 'success'
       );
     });
     await processRun(runId);
