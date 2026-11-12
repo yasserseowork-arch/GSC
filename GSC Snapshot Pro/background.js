@@ -4,6 +4,7 @@ const SEARCH_CONSOLE_HOME_URL = `${GSC_ORIGIN}/search-console`;
 const ROUTE_TIMEOUT_MS = 30000;
 const REPORT_SETTLE_DELAY_MS = 2200;
 const SEARCH_CONSOLE_HOME_SETTLE_DELAY_MS = 350;
+const HIGH_RES_CAPTURE_SCALE = 2;
 const MAX_REPORT_ATTEMPTS = 1;
 const SNAPSHOT_DB_NAME = 'gscSnapshotProDatabase';
 const SNAPSHOT_DB_VERSION = 2;
@@ -732,14 +733,27 @@ async function captureBackgroundTab(tabId) {
   let attached = false;
   let debuggerError = null;
   try {
-    // Preserve the complete visible GSC page exactly as it appears in the reference
-    // screenshots. No clip, crop, or report-card-only surface is requested here.
+    // Capture the entire *visible* Search Console page at 2x CSS resolution. The
+    // clip is the complete viewport (not a cropped report region), so framing stays
+    // identical to the reference screenshots while fine text/chart lines stay sharp.
     await chrome.debugger.attach(target, '1.3');
     attached = true;
+    const layout = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
+    const viewport = layout?.cssVisualViewport || layout?.visualViewport;
+    const clip = viewport?.clientWidth > 0 && viewport?.clientHeight > 0
+      ? {
+        x: Number.isFinite(viewport.pageX) ? viewport.pageX : (viewport.offsetX || 0),
+        y: Number.isFinite(viewport.pageY) ? viewport.pageY : (viewport.offsetY || 0),
+        width: viewport.clientWidth,
+        height: viewport.clientHeight,
+        scale: HIGH_RES_CAPTURE_SCALE
+      }
+      : undefined;
     const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', {
       format: 'png',
       fromSurface: true,
-      captureBeyondViewport: false
+      captureBeyondViewport: Boolean(clip),
+      ...(clip ? { clip } : {})
     });
     if (!result?.data) throw new Error('لم يستجب المتصفح ببيانات الصورة.');
     return `data:image/png;base64,${result.data}`;
