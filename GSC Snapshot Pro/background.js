@@ -710,78 +710,6 @@ async function runCalculationsInTab(tabId, reportType) {
   });
 }
 
-function dataUrlFromBlob(blob) {
-  return blob.arrayBuffer().then((buffer) => {
-    const bytes = new Uint8Array(buffer);
-    const chunkSize = 0x8000;
-    let binary = '';
-    for (let index = 0; index < bytes.length; index += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-    }
-    return `data:${blob.type || 'image/png'};base64,${btoa(binary)}`;
-  });
-}
-
-async function cropScreenshot(dataUrl, crop) {
-  const response = await fetch(dataUrl);
-  const blob = await response.blob();
-  const bitmap = await createImageBitmap(blob);
-  try {
-    const scaleX = bitmap.width / crop.viewportWidth;
-    const scaleY = bitmap.height / crop.viewportHeight;
-    const sourceX = Math.max(0, Math.round(crop.x * scaleX));
-    const sourceY = Math.max(0, Math.round(crop.y * scaleY));
-    const sourceWidth = Math.min(bitmap.width - sourceX, Math.max(1, Math.round(crop.width * scaleX)));
-    const sourceHeight = Math.min(bitmap.height - sourceY, Math.max(1, Math.round(crop.height * scaleY)));
-    // Preserve the small pale GSC page margin around the rounded report surface.
-    // It gives the saved image the same clean report-card framing as the reference screenshots.
-    const frame = Math.max(4, Math.round(5 * scaleX));
-    const canvas = new OffscreenCanvas(sourceWidth + frame * 2, sourceHeight + frame * 2);
-    const context = canvas.getContext('2d');
-    context.fillStyle = '#eef3f8';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(
-      bitmap,
-      sourceX,
-      sourceY,
-      sourceWidth,
-      sourceHeight,
-      frame,
-      frame,
-      sourceWidth,
-      sourceHeight
-    );
-    return dataUrlFromBlob(await canvas.convertToBlob({ type: 'image/png' }));
-  } finally {
-    bitmap.close();
-  }
-}
-
-async function frameCroppedScreenshot(dataUrl, crop) {
-  const response = await fetch(dataUrl);
-  const blob = await response.blob();
-  const bitmap = await createImageBitmap(blob);
-  try {
-    const expectedRatio = crop.width / crop.height;
-    const actualRatio = bitmap.width / bitmap.height;
-    // Some Chrome builds ignore CDP's clip while a page is being composited. Detect
-    // that full-viewport response and crop it explicitly rather than saving it whole.
-    if (Math.abs(actualRatio - expectedRatio) / expectedRatio > 0.08) {
-      return cropScreenshot(dataUrl, crop);
-    }
-    const scale = Math.max(1, Math.min(bitmap.width / crop.width, bitmap.height / crop.height));
-    const frame = Math.max(8, Math.round(10 * scale));
-    const canvas = new OffscreenCanvas(bitmap.width + frame * 2, bitmap.height + frame * 2);
-    const context = canvas.getContext('2d');
-    context.fillStyle = '#eef3f8';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.drawImage(bitmap, frame, frame);
-    return dataUrlFromBlob(await canvas.convertToBlob({ type: 'image/png' }));
-  } finally {
-    bitmap.close();
-  }
-}
-
 async function captureVisibleTabFallback(tabId) {
   // This branch is only used when another DevTools client prevents debugger attachment.
   // The regular path below captures entirely in the background.
@@ -799,29 +727,22 @@ async function captureVisibleTabFallback(tabId) {
   }
 }
 
-async function captureBackgroundTab(tabId, crop) {
+async function captureBackgroundTab(tabId) {
   const target = { tabId };
   let attached = false;
   let debuggerError = null;
   try {
-    // CDP captures the exact report crop at twice the CSS resolution while the user
-    // works elsewhere. It does not depend on the visible browser viewport.
+    // Preserve the complete visible GSC page exactly as it appears in the reference
+    // screenshots. No clip, crop, or report-card-only surface is requested here.
     await chrome.debugger.attach(target, '1.3');
     attached = true;
     const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', {
       format: 'png',
       fromSurface: true,
-      captureBeyondViewport: true,
-      clip: {
-        x: crop.pageX ?? crop.x,
-        y: crop.pageY ?? crop.y,
-        width: crop.width,
-        height: crop.height,
-        scale: 2
-      }
+      captureBeyondViewport: false
     });
     if (!result?.data) throw new Error('لم يستجب المتصفح ببيانات الصورة.');
-    return { imageData: `data:image/png;base64,${result.data}`, isExactCrop: true };
+    return `data:image/png;base64,${result.data}`;
   } catch (error) {
     debuggerError = error;
   } finally {
@@ -835,7 +756,7 @@ async function captureBackgroundTab(tabId, crop) {
   }
 
   try {
-    return { imageData: await captureVisibleTabFallback(tabId), isExactCrop: false };
+    return await captureVisibleTabFallback(tabId);
   } catch (fallbackError) {
     throw new Error(`تعذر التقاط صورة التقرير: ${debuggerError?.message || debuggerError || 'تعذر استخدام الالتقاط في الخلفية'}؛ ${fallbackError.message || fallbackError}`);
   }
@@ -848,17 +769,9 @@ async function captureReport(tabId, property, reportType, metrics = null) {
   });
   if (!target?.ok) throw new Error(target?.error || 'تعذر تجهيز لقطة الشاشة.');
 
-  const captured = await captureBackgroundTab(tabId, target.crop);
-  let image = captured.imageData;
-  try {
-    image = captured.isExactCrop
-      ? await frameCroppedScreenshot(captured.imageData, target.crop)
-      : await cropScreenshot(captured.imageData, target.crop);
-  } catch (error) {
-    // Never save a full browser screenshot. A failed crop must be visible as an error
-    // so the next Property can continue without polluting the snapshot library.
-    throw new Error(`تعذر قص لقطة التقرير إلى منطقة البطاقات والرسم: ${error.message || error}`);
-  }
+  // Keep the entire visible Search Console report page. The requested references use
+  // the complete page framing rather than a cropped chart-only screenshot.
+  const image = await captureBackgroundTab(tabId);
 
   const createdAt = Date.now();
   const filename = reportFileName(property, createdAt);

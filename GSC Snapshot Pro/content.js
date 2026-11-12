@@ -236,56 +236,15 @@
     return anchor.parentElement;
   }
 
-  function reportCaptureBounds(reportRoot) {
-    const metricRects = [...reportRoot.querySelectorAll('[data-label]')]
-      .filter(isVisible)
-      .map((element) => element.getBoundingClientRect())
-      .filter((rect) => rect.width > 50 && rect.height > 35);
-    const chartRects = [...reportRoot.querySelectorAll('svg')]
-      .filter(isVisible)
-      .map((element) => element.getBoundingClientRect())
-      .filter((rect) => rect.width > 260 && rect.height > 100)
-      .sort((first, second) => second.width * second.height - first.width * first.height);
-    const rects = [...metricRects, ...(chartRects.length ? [chartRects[0]] : [])];
-    if (!rects.length) return null;
-
-    // Capture only the metric cards and their comparison chart. This deliberately
-    // excludes the browser frame, left navigation, filters, tables, and side panel.
-    const padding = 12;
-    const left = Math.max(0, Math.min(...rects.map((rect) => rect.left)) - padding);
-    const top = Math.max(0, Math.min(...rects.map((rect) => rect.top)) - padding);
-    const right = Math.min(window.innerWidth, Math.max(...rects.map((rect) => rect.right)) + padding);
-    const bottom = Math.min(window.innerHeight, Math.max(...rects.map((rect) => rect.bottom)) + padding);
-    return { left, top, right, bottom };
-  }
-
   async function prepareCapture({ reportType = 'performance' } = {}) {
     const reportRoot = findReportRoot(reportType);
     if (!reportRoot) return { ok: false, error: 'The Search Console report card was not found.' };
 
+    // Position the complete GSC report page consistently, then let the background
+    // capture keep the entire visible viewport without any crop.
     reportRoot.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'auto' });
-    // Give charts and web fonts a moment to repaint after scrolling before Chrome captures the tab.
     await sleep(700);
-    const bounds = reportCaptureBounds(reportRoot);
-    if (!bounds) return { ok: false, error: 'The Search Console report area was not found.' };
-
-    const width = bounds.right - bounds.left;
-    const height = bounds.bottom - bounds.top;
-    if (width < 50 || height < 50) return { ok: false, error: 'The report card is outside the visible area.' };
-
-    return {
-      ok: true,
-      crop: {
-        x: bounds.left,
-        y: bounds.top,
-        pageX: bounds.left + window.scrollX,
-        pageY: bounds.top + window.scrollY,
-        width,
-        height,
-        viewportWidth: window.innerWidth,
-        viewportHeight: window.innerHeight
-      }
-    };
+    return { ok: true };
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
