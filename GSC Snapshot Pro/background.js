@@ -570,7 +570,9 @@ async function waitForReportRoute(tabId, targetUrl, runId) {
 
 async function navigateToReport(tabId, url, runId) {
   await throwIfCancelled(runId);
-  await chrome.tabs.update(tabId, { url, active: true });
+  // Leave the automation tab in the background. The report is captured through the
+  // DevTools protocol, so it never needs to steal the user's active tab.
+  await chrome.tabs.update(tabId, { url });
   await waitForReportRoute(tabId, url, runId);
   // Let the SPA finish replacing the old report card before reading its metrics.
   await sleepWithCancellation(runId, REPORT_SETTLE_DELAY_MS);
@@ -596,7 +598,8 @@ async function waitForPropertySelector(tabId, runId) {
 
 async function navigateToSearchConsoleHome(tabId, runId) {
   await throwIfCancelled(runId);
-  await chrome.tabs.update(tabId, { url: SEARCH_CONSOLE_HOME_URL, active: true });
+  // Do not bring Search Console to the foreground during automatic processing.
+  await chrome.tabs.update(tabId, { url: SEARCH_CONSOLE_HOME_URL });
   const startedAt = Date.now();
   while (Date.now() - startedAt < ROUTE_TIMEOUT_MS) {
     await throwIfCancelled(runId);
@@ -678,15 +681,42 @@ async function cropScreenshot(dataUrl, crop) {
   }
 }
 
-async function captureReport(tabId, windowId, property, reportType, metrics = null) {
-  await chrome.tabs.update(tabId, { active: true });
+async function captureBackgroundTab(tabId) {
+  const target = { tabId };
+  let attached = false;
+  try {
+    // captureVisibleTab only works for the foreground tab and loses its activeTab grant
+    // after navigation. CDP captures this specific GSC tab while the user works elsewhere.
+    await chrome.debugger.attach(target, '1.3');
+    attached = true;
+    const result = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', {
+      format: 'png',
+      fromSurface: true,
+      captureBeyondViewport: false
+    });
+    if (!result?.data) throw new Error('لم يستجب المتصفح ببيانات الصورة.');
+    return `data:image/png;base64,${result.data}`;
+  } catch (error) {
+    throw new Error(`تعذر التقاط صورة من تبويب Search Console في الخلفية: ${error.message || error}`);
+  } finally {
+    if (attached) {
+      try {
+        await chrome.debugger.detach(target);
+      } catch {
+        // Closing the tab or detaching elsewhere should not hide the original failure.
+      }
+    }
+  }
+}
+
+async function captureReport(tabId, property, reportType, metrics = null) {
   const target = await chrome.tabs.sendMessage(tabId, {
     type: 'GSC_SNAPSHOT_PREPARE_CAPTURE',
     reportType
   });
   if (!target?.ok) throw new Error(target?.error || 'تعذر تجهيز لقطة الشاشة.');
 
-  const fullScreenshot = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+  const fullScreenshot = await captureBackgroundTab(tabId);
   let image = fullScreenshot;
   try {
     image = await cropScreenshot(fullScreenshot, target.crop);
@@ -725,7 +755,7 @@ async function setRecord(runId, index, changes) {
   });
 }
 
-async function runReport(runId, tabId, windowId, property, reportType, recordIndex, { capture = true } = {}) {
+async function runReport(runId, tabId, property, reportType, recordIndex, { capture = true } = {}) {
   const routeName = reportType === 'generative-ai' ? 'Generative AI features' : 'Performance';
   const targetUrl = reportUrl(property.resourceId, reportType);
   let lastError;
@@ -752,7 +782,7 @@ async function runReport(runId, tabId, windowId, property, reportType, recordInd
       await logRunEvent(runId, `جارٍ حفظ لقطة ${routeName} داخل مكتبة الإكستنشن.`, 'info');
       await sleepWithCancellation(runId, 700);
       await throwIfCancelled(runId);
-      const saved = await captureReport(tabId, windowId, property, reportType, calculation.metrics);
+      const saved = await captureReport(tabId, property, reportType, calculation.metrics);
       return { calculation, saved };
     } catch (error) {
       if (error.message === '__CANCELLED__') throw error;
@@ -772,7 +802,7 @@ async function processRun(runId) {
   let initialState = await getRunState();
   if (!initialState || initialState.id !== runId) return;
 
-  const { tabId, windowId, properties, options } = initialState;
+  const { tabId, properties, options } = initialState;
   try {
     for (let index = 0; index < properties.length; index += 1) {
       if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
@@ -792,7 +822,7 @@ async function processRun(runId) {
 
       try {
         // Calculate first so declining clicks can be filtered before any image is saved.
-        const performance = await runReport(runId, tabId, windowId, property, 'performance', index, { capture: false });
+        const performance = await runReport(runId, tabId, property, 'performance', index, { capture: false });
         const clicks = performance.calculation.metrics?.clicks || null;
         await setRecord(runId, index, { clicks });
 
@@ -813,7 +843,7 @@ async function processRun(runId) {
 
         await setRecord(runId, index, { detail: 'جارٍ حفظ لقطة Performance في مكتبة الإكستنشن…' });
         await throwIfCancelled(runId);
-        const performanceSaved = await captureReport(tabId, windowId, property, 'performance', performance.calculation.metrics);
+        const performanceSaved = await captureReport(tabId, property, 'performance', performance.calculation.metrics);
         await throwIfCancelled(runId);
         await setRecord(runId, index, {
           performance: { status: 'captured', ...performanceSaved }
@@ -821,7 +851,7 @@ async function processRun(runId) {
 
         if (options.includeGenerativeAi) {
           try {
-            const generativeAi = await runReport(runId, tabId, windowId, property, 'generative-ai', index);
+            const generativeAi = await runReport(runId, tabId, property, 'generative-ai', index);
             await setRecord(runId, index, {
               generativeAi: { status: 'captured', ...generativeAi.saved }
             });
@@ -966,7 +996,9 @@ async function startRun(message) {
   // If the side panel was opened away from GSC, protect the current page by creating
   // a dedicated Search Console tab for the fully automatic run.
   if (!isGscUrl(tab.url)) {
-    tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+    // A dedicated non-active tab makes it possible to run the whole batch while the
+    // user keeps browsing. It is captured through chrome.debugger, not the viewport.
+    tab = await chrome.tabs.create({ url: 'about:blank', active: false });
   }
 
   const runMode = message.mode === 'selected' ? 'selected' : 'all';
@@ -986,7 +1018,6 @@ async function startRun(message) {
     status: 'running',
     startedAt: Date.now(),
     tabId: tab.id,
-    windowId: tab.windowId,
     runMode,
     requestedProperties,
     properties,
@@ -995,8 +1026,8 @@ async function startRun(message) {
       includeGenerativeAi: message.options?.includeGenerativeAi !== false
     },
     records: queuedRecords(properties),
-    events: [{ id: `${Date.now()}-start`, at: Date.now(), message: 'تم بدء التشغيل بنجاح. ستظهر المراحل هنا لحظة بلحظة.', type: 'success' }],
-    message: 'تم بدء التشغيل. جارٍ فتح Google Search Console تلقائيًا…',
+    events: [{ id: `${Date.now()}-start`, at: Date.now(), message: 'تم بدء التشغيل بنجاح في الخلفية. يمكنك الانتقال لأي تبويب آخر وسيستمر حفظ اللقطات.', type: 'success' }],
+    message: 'تم بدء التشغيل في الخلفية. جارٍ فتح Google Search Console تلقائيًا…',
     cancelRequested: false
   };
   await saveRunState(state);
