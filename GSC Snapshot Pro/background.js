@@ -5,8 +5,99 @@ const ROUTE_TIMEOUT_MS = 30000;
 const REPORT_SETTLE_DELAY_MS = 2200;
 const RETRY_DELAY_MS = 3500;
 const MAX_REPORT_ATTEMPTS = 2;
+const SNAPSHOT_DB_NAME = 'gscSnapshotProDatabase';
+const SNAPSHOT_STORE_NAME = 'snapshots';
+
+let snapshotDatabasePromise;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function createSnapshotId() {
+  return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function openSnapshotDatabase() {
+  if (snapshotDatabasePromise) return snapshotDatabasePromise;
+  snapshotDatabasePromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(SNAPSHOT_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(SNAPSHOT_STORE_NAME)) {
+        const store = database.createObjectStore(SNAPSHOT_STORE_NAME, { keyPath: 'id' });
+        store.createIndex('createdAt', 'createdAt');
+        store.createIndex('resourceId', 'resourceId');
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => {
+      snapshotDatabasePromise = null;
+      reject(request.error || new Error('تعذر فتح مكتبة الصور المحلية.'));
+    };
+  });
+  return snapshotDatabasePromise;
+}
+
+async function saveSnapshot(snapshot) {
+  const database = await openSnapshotDatabase();
+  const record = { id: createSnapshotId(), ...snapshot };
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readwrite');
+    transaction.objectStore(SNAPSHOT_STORE_NAME).put(record);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error('تعذر حفظ الصورة داخل الإكستنشن.'));
+    transaction.onabort = () => reject(transaction.error || new Error('تم إيقاف حفظ الصورة داخل الإكستنشن.'));
+  });
+  return record;
+}
+
+async function getSnapshot(snapshotId) {
+  const database = await openSnapshotDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readonly');
+    const request = transaction.objectStore(SNAPSHOT_STORE_NAME).get(snapshotId);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error('تعذر قراءة الصورة المحفوظة.'));
+  });
+}
+
+async function listSnapshots() {
+  const database = await openSnapshotDatabase();
+  const records = await new Promise((resolve, reject) => {
+    const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readonly');
+    const request = transaction.objectStore(SNAPSHOT_STORE_NAME).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error || new Error('تعذر قراءة مكتبة الصور.'));
+  });
+  // Do not send the image payload into the popup; the side panel asks for one image only when opened.
+  return records
+    .map(({ imageData, ...metadata }) => metadata)
+    .sort((first, second) => second.createdAt - first.createdAt);
+}
+
+async function deleteSnapshot(snapshotId) {
+  const database = await openSnapshotDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readwrite');
+    transaction.objectStore(SNAPSHOT_STORE_NAME).delete(snapshotId);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error('تعذر حذف الصورة.'));
+  });
+}
+
+async function clearSnapshots() {
+  const database = await openSnapshotDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = database.transaction(SNAPSHOT_STORE_NAME, 'readwrite');
+    transaction.objectStore(SNAPSHOT_STORE_NAME).clear();
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error || new Error('تعذر مسح مكتبة الصور.'));
+  });
+}
+
+async function snapshotSummary() {
+  const snapshots = await listSnapshots();
+  return { count: snapshots.length, latest: snapshots[0] || null };
+}
 
 function isGscUrl(url) {
   try {
@@ -140,45 +231,97 @@ async function discoverProperties() {
 
   const [result] = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: async () => {
+    args: [current.resourceId],
+    func: async (currentResourceId) => {
       const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-      const readResources = () => {
-        const items = new Map();
-        const add = (resourceId, label) => {
-          if (!resourceId || items.has(resourceId)) return;
-          items.set(resourceId, { resourceId, label: (label || resourceId).trim() });
-        };
-
-        document.querySelectorAll('a[href*="resource_id="]').forEach((link) => {
-          try {
-            const resourceId = new URL(link.href).searchParams.get('resource_id');
-            add(resourceId, link.textContent);
-          } catch {
-            // Ignore malformed navigation links.
-          }
-        });
-        document.querySelectorAll('[data-resource-id]').forEach((element) => {
-          add(element.getAttribute('data-resource-id'), element.textContent);
-        });
-        return [...items.values()];
+      const items = new Map();
+      const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 180);
+      const add = (resourceId, label) => {
+        if (!resourceId || items.has(resourceId)) return;
+        items.set(resourceId, { resourceId, label: cleanText(label) || resourceId });
       };
-
-      let resources = readResources();
-      if (resources.length < 2) {
-        const buttons = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], button')];
-        const propertyControl = buttons.find((element) => {
-          const rect = element.getBoundingClientRect();
-          const text = `${element.getAttribute('aria-label') || ''} ${element.textContent || ''}`;
-          return rect.left < 380 && rect.top < 190 && rect.width > 70 && /property|site|domain|https?:\/\//i.test(text);
-        });
-        if (propertyControl) {
-          propertyControl.click();
-          await pause(650);
-          resources = readResources();
-          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const resourceFromUrl = (value) => {
+        try {
+          return new URL(value, location.href).searchParams.get('resource_id');
+        } catch {
+          return null;
         }
+      };
+      const scan = (root = document) => {
+        root.querySelectorAll('[data-resource-id]').forEach((element) => {
+          add(element.getAttribute('data-resource-id'), element.getAttribute('aria-label') || element.textContent);
+        });
+        root.querySelectorAll('a[href*="resource_id="], [data-href*="resource_id="]').forEach((element) => {
+          const resourceId = resourceFromUrl(element.href || element.getAttribute('data-href'));
+          add(resourceId, element.getAttribute('aria-label') || element.textContent);
+        });
+      };
+      const isVisible = (element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
+      };
+      const displayCurrent = decodeURIComponent(currentResourceId).replace(/^sc-domain:/, '').toLowerCase();
+      const propertyControl = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], button, [role="button"]')]
+        .filter(isVisible)
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          const text = cleanText(`${element.getAttribute('aria-label') || ''} ${element.textContent || ''}`).toLowerCase();
+          if (/inspect|inspection|inspect any url|فحص عنوان url/.test(text)) return null;
+          if (rect.top > 200 || rect.left > 360 || rect.width < 60) return null;
+          let score = 0;
+          if (text.includes(displayCurrent)) score += 100;
+          if (/property|properties|site|sites|domain|domains|sc-domain|https?:\/\//.test(text)) score += 30;
+          if (element.hasAttribute('aria-haspopup')) score += 15;
+          if (rect.left < 280) score += 8;
+          return score ? { element, score } : null;
+        })
+        .filter(Boolean)
+        .sort((first, second) => second.score - first.score)[0]?.element;
+
+      scan();
+      let menuWasOpened = false;
+      if (propertyControl) {
+        propertyControl.click();
+        menuWasOpened = true;
+        await pause(800);
+        scan();
       }
-      return resources;
+
+      // GSC virtualizes long property lists. Scrolling the selector menu progressively
+      // makes every accessible property appear in the DOM so it can be collected.
+      const scrollRoots = [...document.querySelectorAll('[role="listbox"], [role="menu"], [role="dialog"], div')]
+        .filter(isVisible)
+        .filter((element) => element.scrollHeight > element.clientHeight + 12 && element.clientHeight > 90)
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          const roleBonus = /listbox|menu|dialog/.test(element.getAttribute('role') || '') ? 1000 : 0;
+          const sideBonus = rect.left < 520 ? 100 : 0;
+          return { element, score: roleBonus + sideBonus + Math.min(element.clientHeight, 600) };
+        })
+        .sort((first, second) => second.score - first.score);
+      const scrollRoot = scrollRoots[0]?.element;
+
+      if (scrollRoot) {
+        scrollRoot.scrollTop = 0;
+        await pause(180);
+        let stalledSteps = 0;
+        let previousCount = items.size;
+        for (let step = 0; step < 80 && stalledSteps < 4; step += 1) {
+          scan(scrollRoot);
+          const atBottom = scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 2;
+          if (items.size === previousCount) stalledSteps += 1;
+          else stalledSteps = 0;
+          previousCount = items.size;
+          if (atBottom) break;
+          scrollRoot.scrollTop = Math.min(scrollRoot.scrollTop + Math.max(160, scrollRoot.clientHeight * 0.8), scrollRoot.scrollHeight);
+          await pause(180);
+        }
+        scan(scrollRoot);
+        scrollRoot.scrollTop = 0;
+      }
+
+      if (menuWasOpened) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return [...items.values()];
     }
   });
 
@@ -190,7 +333,7 @@ async function discoverProperties() {
       label: property.label || displayProperty(property.resourceId)
     });
   });
-  return [...all.values()];
+  return [...all.values()].sort((first, second) => first.label.localeCompare(second.label));
 }
 
 function isExpectedReportRoute(currentUrl, targetUrl) {
@@ -269,15 +412,21 @@ async function cropScreenshot(dataUrl, crop) {
     const sourceY = Math.max(0, Math.round(crop.y * scaleY));
     const sourceWidth = Math.min(bitmap.width - sourceX, Math.max(1, Math.round(crop.width * scaleX)));
     const sourceHeight = Math.min(bitmap.height - sourceY, Math.max(1, Math.round(crop.height * scaleY)));
-    const canvas = new OffscreenCanvas(sourceWidth, sourceHeight);
-    canvas.getContext('2d').drawImage(
+    // Preserve the small pale GSC page margin around the rounded report surface.
+    // It gives the saved image the same clean report-card framing as the reference screenshots.
+    const frame = Math.max(4, Math.round(5 * scaleX));
+    const canvas = new OffscreenCanvas(sourceWidth + frame * 2, sourceHeight + frame * 2);
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#eef3f8';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(
       bitmap,
       sourceX,
       sourceY,
       sourceWidth,
       sourceHeight,
-      0,
-      0,
+      frame,
+      frame,
       sourceWidth,
       sourceHeight
     );
@@ -287,7 +436,7 @@ async function cropScreenshot(dataUrl, crop) {
   }
 }
 
-async function captureReport(tabId, windowId, property, reportType) {
+async function captureReport(tabId, windowId, property, reportType, metrics = null) {
   await chrome.tabs.update(tabId, { active: true });
   const target = await chrome.tabs.sendMessage(tabId, {
     type: 'GSC_SNAPSHOT_PREPARE_CAPTURE',
@@ -300,17 +449,24 @@ async function captureReport(tabId, windowId, property, reportType) {
   try {
     image = await cropScreenshot(fullScreenshot, target.crop);
   } catch (error) {
-    // A full report screenshot is preferable to dropping a finished report if browser image APIs fail.
+    // A complete report capture is preferable to dropping a finished report if browser image APIs fail.
     console.warn('Could not crop Search Console screenshot', error);
   }
 
-  const downloadId = await chrome.downloads.download({
-    url: image,
-    filename: reportFileName(property, reportType),
-    conflictAction: 'uniquify',
-    saveAs: false
+  const filename = reportFileName(property, reportType);
+  const snapshot = await saveSnapshot({
+    propertyLabel: property.label,
+    resourceId: property.resourceId,
+    reportType,
+    metrics,
+    filename,
+    createdAt: Date.now(),
+    imageData: image
   });
-  return { downloadId, filename: reportFileName(property, reportType) };
+  chrome.runtime.sendMessage({ type: 'SNAPSHOT_LIBRARY_UPDATED' }).catch(() => {
+    // No popup or side panel is open; the image is still safely saved in IndexedDB.
+  });
+  return { snapshotId: snapshot.id, filename };
 }
 
 async function cancellationRequested(runId) {
@@ -347,9 +503,9 @@ async function runReport(runId, tabId, windowId, property, reportType, recordInd
       if (await cancellationRequested(runId)) throw new Error('__CANCELLED__');
 
       if (!capture) return { calculation };
-      await setRecord(runId, recordIndex, { detail: `جارٍ تثبيت وحفظ لقطة ${routeName}…` });
+      await setRecord(runId, recordIndex, { detail: `جارٍ تثبيت وحفظ لقطة ${routeName} في مكتبة الإكستنشن…` });
       await sleep(700);
-      const saved = await captureReport(tabId, windowId, property, reportType);
+      const saved = await captureReport(tabId, windowId, property, reportType, calculation.metrics);
       return { calculation, saved };
     } catch (error) {
       if (error.message === '__CANCELLED__') throw error;
@@ -395,8 +551,8 @@ async function processRun(runId) {
           continue;
         }
 
-        await setRecord(runId, index, { detail: 'جارٍ حفظ لقطة Performance…' });
-        const performanceSaved = await captureReport(tabId, windowId, property, 'performance');
+        await setRecord(runId, index, { detail: 'جارٍ حفظ لقطة Performance في مكتبة الإكستنشن…' });
+        const performanceSaved = await captureReport(tabId, windowId, property, 'performance', performance.calculation.metrics);
         await setRecord(runId, index, {
           performance: { status: 'captured', ...performanceSaved }
         });
@@ -429,7 +585,7 @@ async function processRun(runId) {
 
     await updateRunState(runId, (state) => {
       state.status = 'completed';
-      state.message = 'اكتمل حفظ جميع التقارير المتاحة في التنزيلات.';
+      state.message = 'اكتمل حفظ جميع التقارير المتاحة داخل مكتبة الإكستنشن.';
       state.cancelRequested = false;
     });
   } catch (error) {
@@ -514,6 +670,40 @@ async function startRun(message) {
   return { started: true, state };
 }
 
+async function openSnapshotSidePanel(tabId) {
+  if (!chrome.sidePanel) throw new Error('ميزة Side Panel تحتاج إصدار Chrome حديث.');
+  const targetTabId = tabId || (await getActiveTab()).id;
+  await chrome.sidePanel.setOptions({
+    tabId: targetTabId,
+    path: 'sidepanel.html',
+    enabled: true
+  });
+  await chrome.sidePanel.open({ tabId: targetTabId });
+  return { ok: true };
+}
+
+async function exportSnapshot(snapshotId) {
+  const snapshot = await getSnapshot(snapshotId);
+  if (!snapshot?.imageData) throw new Error('الصورة المطلوبة غير موجودة في مكتبة الإكستنشن.');
+  const downloadId = await chrome.downloads.download({
+    url: snapshot.imageData,
+    filename: snapshot.filename,
+    conflictAction: 'uniquify',
+    saveAs: false
+  });
+  return { downloadId, filename: snapshot.filename };
+}
+
+function configureSidePanel() {
+  if (!chrome.sidePanel) return;
+  chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true }).catch((error) => {
+    console.debug('Could not configure the snapshot side panel.', error);
+  });
+}
+
+chrome.runtime.onInstalled.addListener(configureSidePanel);
+chrome.runtime.onStartup.addListener(configureSidePanel);
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type) return undefined;
 
@@ -521,6 +711,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     GET_RUN_STATE: async () => ({ state: await getRunState() }),
     GET_CURRENT_PROPERTY: getCurrentProperty,
     DISCOVER_PROPERTIES: async () => ({ properties: await discoverProperties() }),
+    GET_SNAPSHOT_SUMMARY: async () => snapshotSummary(),
+    LIST_SNAPSHOTS: async () => ({ snapshots: await listSnapshots() }),
+    GET_SNAPSHOT: async () => ({ snapshot: await getSnapshot(message.snapshotId) }),
+    DELETE_SNAPSHOT: async () => {
+      await deleteSnapshot(message.snapshotId);
+      return snapshotSummary();
+    },
+    CLEAR_SNAPSHOTS: async () => {
+      await clearSnapshots();
+      return { count: 0 };
+    },
+    EXPORT_SNAPSHOT: async () => exportSnapshot(message.snapshotId),
+    OPEN_SNAPSHOT_SIDEBAR: async () => openSnapshotSidePanel(message.tabId),
     START_RUN: () => startRun(message),
     CANCEL_RUN: async () => {
       const state = await getRunState();

@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "GSC Snapshot Pro",
-  "version": "2.1.0",
-  "description": "Creates reliable week-over-week Google Search Console screenshots with calculated performance changes.",
+  "version": "2.2.0",
+  "description": "Yasser SEO week-over-week Search Console snapshots with calculated performance changes.",
   "permissions": [
     "activeTab",
     "downloads",
     "scripting",
+    "sidePanel",
     "storage",
-    "tabs"
+    "tabs",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://search.google.com/*"
@@ -19,6 +21,9 @@
   },
   "background": {
     "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "icons": {
     "48": "icon48.png",

@@ -4,40 +4,67 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GSC Snapshot Pro</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main class="container">
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
     <header class="header">
-      <img src="logo.png" alt="GSC Snapshot Pro">
-      <div>
-        <h1>GSC Snapshot Pro</h1>
-        <p>مقارنة أسبوع بأسبوع + لقطات جاهزة للتقرير</p>
+      <div class="logo-shell"><img src="logo.png" alt="GSC Snapshot Pro"></div>
+      <div class="brand-copy">
+        <span class="brand-kicker">YASSER SEO · DATA TOOL</span>
+        <h1>GSC Snapshot <em>Pro</em></h1>
+        <p>تقارير أسبوعية واضحة — مبنية على أرقام Search Console</p>
       </div>
     </header>
 
     <section class="current-property" aria-live="polite">
-      <span class="eyebrow">الموقع المفتوح الآن في Search Console</span>
-      <strong id="current-property">جارٍ التحقق…</strong>
+      <div class="property-icon" aria-hidden="true">⌁</div>
+      <div>
+        <span class="eyebrow">الـ Property المفتوح الآن</span>
+        <strong id="current-property">جارٍ التحقق…</strong>
+      </div>
     </section>
+
+    <button id="open-library" class="library-button" type="button">
+      <span class="library-icon" aria-hidden="true">▣</span>
+      <span>مكتبة اللقطات</span>
+      <b id="library-count">0</b>
+      <span class="library-arrow" aria-hidden="true">←</span>
+    </button>
 
     <section class="settings" aria-label="إعدادات التقرير">
+      <div class="section-label"><span>01</span> إعدادات التشغيل</div>
       <label for="properties">المواقع المطلوب تشغيلها</label>
       <textarea id="properties" rows="4" spellcheck="false" placeholder="اترك الحقل فارغًا للموقع المفتوح الآن&#10;أو أضف موقعًا في كل سطر، مثل:&#10;sc-domain:example.com&#10;https://www.example.com/"></textarea>
-      <div class="field-hint">يتم تشغيل المواقع بالترتيب. يمكن استيراد المواقع المتاحة من قائمة الخصائص في GSC، أو كتابة القائمة يدويًا.</div>
-      <button id="discover-properties" class="secondary compact" type="button">استيراد المواقع من قائمة الخصائص</button>
+      <div class="field-hint">سيتم التشغيل بالترتيب. الاستيراد يمر على قائمة الخصائص بالكامل داخل حساب Search Console المفتوح.</div>
+      <button id="discover-properties" class="secondary compact" type="button">
+        <span aria-hidden="true">↓</span> استيراد كل الخصائص من الحساب
+      </button>
 
-      <label class="check-row">
-        <input id="skip-declines" type="checkbox" checked>
-        <span>تخطي الموقع إذا كانت النقرات أقل من الأسبوع السابق</span>
-      </label>
-      <label class="check-row">
-        <input id="include-generative" type="checkbox" checked>
-        <span>التقاط تقرير <bdi>Generative AI features</bdi> أيضًا</span>
-      </label>
+      <div class="toggles">
+        <label class="check-row">
+          <input id="skip-declines" type="checkbox" checked>
+          <span class="fake-check"></span>
+          <span><b>فلترة ذكية للنقرات</b><small>تخطي الموقع إذا كانت النقرات أقل من الأسبوع السابق</small></span>
+        </label>
+        <label class="check-row">
+          <input id="include-generative" type="checkbox" checked>
+          <span class="fake-check"></span>
+          <span><bdi><b>Generative AI features</b></bdi><small>حفظ لقطة تقرير الذكاء الاصطناعي عند توفره</small></span>
+        </label>
+      </div>
     </section>
 
-    <button id="start-run" class="primary" type="button">بدء التقرير التلقائي</button>
+    <button id="start-run" class="primary" type="button">
+      <span class="button-icon" aria-hidden="true">↗</span>
+      بدء التقرير التلقائي
+    </button>
     <button id="cancel-run" class="danger hidden" type="button">إيقاف التشغيل</button>
 
     <section id="run-panel" class="run-panel" aria-live="polite" hidden>
@@ -50,8 +77,8 @@
     </section>
 
     <details class="manual-tools">
-      <summary>أدوات الحساب اليدوية</summary>
-      <p>استخدمها على صفحة GSC المفتوحة إذا أردت تطبيق الحسابات أو علامات تحديثات الخوارزمية بنفسك.</p>
+      <summary><span>02</span> أدوات الحساب اليدوية</summary>
+      <p>طبّق نسب التغيير أو علامات تحديثات الخوارزميات يدويًا على صفحة GSC المفتوحة.</p>
       <div class="manual-buttons">
         <button id="run-script" class="purple" type="button">Calculate Percentage Change</button>
         <button id="show-algo-updates" class="green" type="button">Add Algorithm Updates</button>
@@ -60,7 +87,8 @@
     </details>
 
     <footer>
-      تُحفظ الصور تلقائيًا في مجلد التنزيلات باسم الموقع ضمن <code>GSC Snapshot Pro</code>.
+      <span class="footer-dot"></span>
+      الصور تحفظ داخل <b>مكتبة اللقطات</b> في الإكستنشن ويمكن تنزيل نسخة منها وقتما تريد.
     </footer>
   </main>
   <script src="popup.js"></script>

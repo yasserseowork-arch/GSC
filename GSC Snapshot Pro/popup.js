@@ -87,7 +87,10 @@ async function refreshState() {
     const { state } = await chrome.runtime.sendMessage({ type: 'GET_RUN_STATE' });
     renderRunState(state);
     if (state?.status === 'running') startPolling();
-    else stopPolling();
+    else {
+      stopPolling();
+      refreshSnapshotSummary();
+    }
   } catch (error) {
     console.debug('Unable to read run state', error);
   }
@@ -100,6 +103,29 @@ function startPolling() {
 function stopPolling() {
   if (pollingTimer) window.clearInterval(pollingTimer);
   pollingTimer = null;
+}
+
+async function refreshSnapshotSummary() {
+  try {
+    const summary = await chrome.runtime.sendMessage({ type: 'GET_SNAPSHOT_SUMMARY' });
+    $('#library-count').textContent = String(summary?.count || 0);
+  } catch (error) {
+    console.debug('Unable to read snapshot summary', error);
+  }
+}
+
+async function openLibrary() {
+  const button = $('#open-library');
+  button.disabled = true;
+  try {
+    const tab = await activeTab();
+    const response = await chrome.runtime.sendMessage({ type: 'OPEN_SNAPSHOT_SIDEBAR', tabId: tab.id });
+    if (!response?.ok) throw new Error(response?.error || 'تعذر فتح مكتبة اللقطات.');
+    window.close();
+  } catch (error) {
+    showError(error);
+    button.disabled = false;
+  }
 }
 
 async function loadCurrentProperty() {
@@ -116,13 +142,14 @@ async function loadCurrentProperty() {
 async function discoverProperties() {
   const button = $('#discover-properties');
   button.disabled = true;
-  setManualStatus('جارٍ قراءة قائمة الخصائص المتاحة…');
+  setManualStatus('جارٍ فتح قائمة الخصائص وقراءة كل المواقع في الحساب…');
   try {
     const response = await chrome.runtime.sendMessage({ type: 'DISCOVER_PROPERTIES' });
+    if (response?.error) throw new Error(response.error);
     if (!response.properties?.length) throw new Error('لم يتم العثور على مواقع. اكتب قائمة المواقع يدويًا.');
 
     $('#properties').value = response.properties.map((property) => property.resourceId).join('\n');
-    setManualStatus(`تم استيراد ${response.properties.length} موقع/مواقع.`, 'success');
+    setManualStatus(`تم استيراد ${response.properties.length} Property من الحساب.`, 'success');
   } catch (error) {
     showError(error);
   } finally {
@@ -212,14 +239,19 @@ async function runAlgorithmUpdates() {
   }
 }
 
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'SNAPSHOT_LIBRARY_UPDATED') refreshSnapshotSummary();
+});
+
 document.addEventListener('DOMContentLoaded', async () => {
+  $('#open-library').addEventListener('click', openLibrary);
   $('#discover-properties').addEventListener('click', discoverProperties);
   $('#start-run').addEventListener('click', startRun);
   $('#cancel-run').addEventListener('click', cancelRun);
   $('#run-script').addEventListener('click', runManualCalculations);
   $('#show-algo-updates').addEventListener('click', runAlgorithmUpdates);
 
-  await Promise.all([loadCurrentProperty(), refreshState()]);
+  await Promise.all([loadCurrentProperty(), refreshState(), refreshSnapshotSummary()]);
 });
 
 window.addEventListener('unload', stopPolling);

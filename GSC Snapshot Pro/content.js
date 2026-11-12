@@ -213,15 +213,43 @@
     return anchor.parentElement;
   }
 
-  async function prepareCapture({ reportType = 'performance' } = {}) {
-    const root = findReportRoot(reportType);
-    if (!root) return { ok: false, error: 'The Search Console report card was not found.' };
+  function findCaptureSurface(reportRoot) {
+    const candidates = [];
+    let element = reportRoot;
+    for (let depth = 0; element?.parentElement && depth < 8; depth += 1) {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      const radius = Math.max(
+        Number.parseFloat(style.borderTopLeftRadius) || 0,
+        Number.parseFloat(style.borderTopRightRadius) || 0,
+        Number.parseFloat(style.borderBottomLeftRadius) || 0,
+        Number.parseFloat(style.borderBottomRightRadius) || 0
+      );
+      const hasSurfaceColor = style.backgroundColor !== 'rgba(0, 0, 0, 0)' && style.backgroundColor !== 'transparent';
+      const hasChart = Boolean(element.querySelector('svg'));
+      if (hasChart && rect.width > 450 && rect.height > 250 && rect.width <= window.innerWidth + 30) {
+        const score = (radius >= 8 ? 100 : 0)
+          + (hasSurfaceColor ? 20 : 0)
+          + (style.boxShadow !== 'none' ? 10 : 0)
+          - Math.max(0, rect.height - window.innerHeight) / 20;
+        candidates.push({ element, score });
+      }
+      element = element.parentElement;
+    }
+    return candidates.sort((first, second) => second.score - first.score)[0]?.element || reportRoot;
+  }
 
+  async function prepareCapture({ reportType = 'performance' } = {}) {
+    const reportRoot = findReportRoot(reportType);
+    if (!reportRoot) return { ok: false, error: 'The Search Console report card was not found.' };
+
+    const root = findCaptureSurface(reportRoot);
     root.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'auto' });
     // Give charts and web fonts a moment to repaint after scrolling before Chrome captures the tab.
     await sleep(1000);
     const rect = root.getBoundingClientRect();
-    const padding = 10;
+    // Keep a slim GSC page margin around the rounded report surface, matching the report-card framing.
+    const padding = 5;
     const left = Math.max(0, rect.left - padding);
     const top = Math.max(0, rect.top - padding);
     const width = Math.min(window.innerWidth - left, rect.width + padding * 2);

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>مكتبة اللقطات — GSC Snapshot Pro</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&family=Inter:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo-shell"><img src="logo.png" alt="GSC Snapshot Pro"></div>
+        <div>
+          <span class="brand-kicker">YASSER SEO · SNAPSHOTS</span>
+          <h1>مكتبة اللقطات</h1>
+        </div>
+      </div>
+      <button id="clear-library" class="clear-button" type="button" title="مسح كل اللقطات">مسح الكل</button>
+    </header>
+
+    <section class="library-summary">
+      <span class="summary-dot"></span>
+      <span><b id="snapshot-count">0</b> لقطة محفوظة داخل الإكستنشن</span>
+      <small>اختر أي لقطة للمعاينة أو تنزيل نسخة منها.</small>
+    </section>
+
+    <section class="layout">
+      <aside class="snapshot-list-wrap" aria-label="قائمة اللقطات">
+        <div id="snapshot-list" class="snapshot-list"></div>
+      </aside>
+
+      <section class="preview-panel" aria-live="polite">
+        <div id="empty-preview" class="empty-preview">
+          <div class="empty-icon">▣</div>
+          <h2>لا توجد لقطة محددة</h2>
+          <p>بعد تشغيل التقرير ستظهر صور Performance وGenerative AI هنا تلقائيًا.</p>
+        </div>
+
+        <div id="snapshot-preview" class="snapshot-preview" hidden>
+          <div class="preview-meta">
+            <div>
+              <span id="preview-type" class="type-badge"></span>
+              <h2 id="preview-property"></h2>
+              <p id="preview-date"></p>
+            </div>
+            <div id="preview-change" class="metric-chip" hidden></div>
+          </div>
+          <div class="image-frame"><img id="preview-image" alt="لقطة تقرير Search Console"></div>
+          <div class="preview-actions">
+            <button id="export-snapshot" class="export-button" type="button">تنزيل نسخة PNG</button>
+            <button id="delete-snapshot" class="delete-button" type="button">حذف من المكتبة</button>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
