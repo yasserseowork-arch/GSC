@@ -16,8 +16,7 @@
     "https://search.google.com/*"
   ],
   "action": {
-    "default_title": "GSC Snapshot Pro",
-    "default_popup": "popup.html"
+    "default_title": "GSC Snapshot Pro"
   },
   "background": {
     "service_worker": "background.js"

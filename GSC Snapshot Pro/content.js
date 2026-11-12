@@ -1,10 +1,11 @@
 (() => {
-  // This file is injected both by the manual calculator and by the auto reporter.
-  // Guarding it prevents duplicate listeners when a user clicks the manual button twice.
+  // This file is injected by the automated report runner on each Search Console report.
+  // Guarding it prevents duplicate message listeners if the report is retried.
   if (window.__gscSnapshotReporterLoaded) return;
   window.__gscSnapshotReporterLoaded = true;
 
-  const REPORT_DATA_TIMEOUT_MS = 90000;
+  const PERFORMANCE_DATA_TIMEOUT_MS = 40000;
+  const GENERATIVE_AI_DATA_TIMEOUT_MS = 25000;
   const DATA_POLL_INTERVAL_MS = 750;
   const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
   const isVisible = (element) => Boolean(element && element.getClientRects().length && getComputedStyle(element).visibility !== 'hidden');
@@ -80,12 +81,34 @@
     return metric ? `${metric.current}:${metric.previous}` : null;
   }
 
-  async function waitForComparisonData(reportType, timeout = REPORT_DATA_TIMEOUT_MS) {
+  function blockingReportMessage() {
+    const text = (document.body?.innerText || '').toLowerCase();
+    const blocked = [
+      /you don't have access/,
+      /you do not have access/,
+      /not eligible/,
+      /not available for this property/,
+      /no data available/,
+      /something went wrong/,
+      /ليس لديك صلاحية/,
+      /لا تتوفر بيانات/,
+      /حدث خطأ/
+    ];
+    return blocked.some((pattern) => pattern.test(text));
+  }
+
+  async function waitForComparisonData(reportType) {
+    const timeout = reportType === 'generative-ai'
+      ? GENERATIVE_AI_DATA_TIMEOUT_MS
+      : PERFORMANCE_DATA_TIMEOUT_MS;
     const startedAt = Date.now();
     let previousSignature = null;
     let stableReads = 0;
 
     while (Date.now() - startedAt < timeout) {
+      if (blockingReportMessage()) {
+        throw new Error('هذا التقرير غير متاح أو لا توجد بيانات قابلة للمقارنة لهذا الـ Property.');
+      }
       const signature = comparisonSignature(reportType);
       if (signature) {
         // A second identical read prevents taking a screenshot while GSC is replacing
@@ -178,7 +201,7 @@
     if (!available) {
       return {
         ok: false,
-        error: 'لم تصل بيانات المقارنة خلال 90 ثانية. تأكد أن تقرير Last 7 days مقابل Previous period متاح لهذا الموقع ثم أعد المحاولة.'
+        error: 'لم تصل بيانات المقارنة في الوقت المتوقع. تم تخطي هذا التقرير بدلًا من إبقاء التشغيل عالقًا.'
       };
     }
 

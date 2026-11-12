@@ -3,8 +3,7 @@ const GSC_ORIGIN = 'https://search.google.com';
 const REPORT_ZOOM = 0.8;
 const ROUTE_TIMEOUT_MS = 30000;
 const REPORT_SETTLE_DELAY_MS = 2200;
-const RETRY_DELAY_MS = 3500;
-const MAX_REPORT_ATTEMPTS = 2;
+const MAX_REPORT_ATTEMPTS = 1;
 const SNAPSHOT_DB_NAME = 'gscSnapshotProDatabase';
 const SNAPSHOT_STORE_NAME = 'snapshots';
 
@@ -68,7 +67,7 @@ async function listSnapshots() {
     request.onsuccess = () => resolve(request.result || []);
     request.onerror = () => reject(request.error || new Error('تعذر قراءة مكتبة الصور.'));
   });
-  // Do not send the image payload into the popup; the side panel asks for one image only when opened.
+  // Do not send the image payload in the list; the side panel asks for one image only when it is selected.
   return records
     .map(({ imageData, ...metadata }) => metadata)
     .sort((first, second) => second.createdAt - first.createdAt);
@@ -202,7 +201,7 @@ async function getCurrentProperty() {
     };
   }
 
-  // The URL is the source of truth. The small DOM probe only improves the label shown in the popup.
+  // The URL is the source of truth. The small DOM probe only improves the label shown in the side panel.
   try {
     const [result] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -261,7 +260,9 @@ async function discoverProperties() {
         return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== 'hidden';
       };
       const displayCurrent = decodeURIComponent(currentResourceId).replace(/^sc-domain:/, '').toLowerCase();
-      const propertyControl = [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], button, [role="button"]')]
+      // This stable Search Console container is more reliable than guessing from the page's URL-inspection input.
+      const selectorControl = document.querySelector('#resource-selector-container [role="button"][aria-haspopup="menu"]');
+      const propertyControl = selectorControl || [...document.querySelectorAll('[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], button, [role="button"]')]
         .filter(isVisible)
         .map((element) => {
           const rect = element.getBoundingClientRect();
@@ -296,7 +297,13 @@ async function discoverProperties() {
           const rect = element.getBoundingClientRect();
           const roleBonus = /listbox|menu|dialog/.test(element.getAttribute('role') || '') ? 1000 : 0;
           const sideBonus = rect.left < 520 ? 100 : 0;
-          return { element, score: roleBonus + sideBonus + Math.min(element.clientHeight, 600) };
+          const resourcesInside = new Set([
+            ...[...element.querySelectorAll('[data-resource-id]')].map((node) => node.getAttribute('data-resource-id')),
+            ...[...element.querySelectorAll('a[href*="resource_id="], [data-href*="resource_id="]')]
+              .map((node) => resourceFromUrl(node.href || node.getAttribute('data-href')))
+          ].filter(Boolean)).size;
+          // A property menu contains several unique resource ids; report content only repeats the current one.
+          return { element, score: resourcesInside * 10000 + roleBonus + sideBonus + Math.min(element.clientHeight, 600) };
         })
         .sort((first, second) => second.score - first.score);
       const scrollRoot = scrollRoots[0]?.element;
@@ -464,7 +471,7 @@ async function captureReport(tabId, windowId, property, reportType, metrics = nu
     imageData: image
   });
   chrome.runtime.sendMessage({ type: 'SNAPSHOT_LIBRARY_UPDATED' }).catch(() => {
-    // No popup or side panel is open; the image is still safely saved in IndexedDB.
+    // No side panel is open; the image is still safely saved in IndexedDB.
   });
   return { snapshotId: snapshot.id, filename };
 }
@@ -510,10 +517,6 @@ async function runReport(runId, tabId, windowId, property, reportType, recordInd
     } catch (error) {
       if (error.message === '__CANCELLED__') throw error;
       lastError = error;
-      if (attempt < MAX_REPORT_ATTEMPTS) {
-        await setRecord(runId, recordIndex, { detail: `تأخر GSC في تحميل البيانات؛ انتظار ${RETRY_DELAY_MS / 1000} ثوانٍ قبل المحاولة التالية…` });
-        await sleep(RETRY_DELAY_MS);
-      }
     }
   }
 
@@ -660,7 +663,7 @@ async function startRun(message) {
   };
   await saveRunState(state);
 
-  // Do not await the long-running flow: the popup receives an immediate response and may be closed safely.
+  // Do not await the long-running flow: the side panel receives an immediate response and can stay open safely.
   processRun(state.id).catch(async (error) => {
     await updateRunState(state.id, (latest) => {
       latest.status = 'failed';
@@ -696,6 +699,10 @@ async function exportSnapshot(snapshotId) {
 
 function configureSidePanel() {
   if (!chrome.sidePanel) return;
+  // The extension action opens this persistent right-side panel directly; there is no transient popup.
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((error) => {
+    console.debug('Could not configure side-panel action behavior.', error);
+  });
   chrome.sidePanel.setOptions({ path: 'sidepanel.html', enabled: true }).catch((error) => {
     console.debug('Could not configure the snapshot side panel.', error);
   });

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>مكتبة اللقطات — GSC Snapshot Pro</title>
+  <title>GSC Snapshot Pro</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&family=Inter:wght@500;600;700;800&display=swap" rel="stylesheet">
@@ -11,51 +11,100 @@
 </head>
 <body>
   <main class="app-shell">
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+
     <header class="topbar">
       <div class="brand">
         <div class="logo-shell"><img src="logo.png" alt="GSC Snapshot Pro"></div>
         <div>
-          <span class="brand-kicker">YASSER SEO · SNAPSHOTS</span>
-          <h1>مكتبة اللقطات</h1>
+          <span class="brand-kicker">YASSER SEO · DATA TOOL</span>
+          <h1>GSC Snapshot <em>Pro</em></h1>
         </div>
       </div>
-      <button id="clear-library" class="clear-button" type="button" title="مسح كل اللقطات">مسح الكل</button>
+      <span class="live-badge"><i></i> LIVE</span>
     </header>
 
-    <section class="library-summary">
-      <span class="summary-dot"></span>
-      <span><b id="snapshot-count">0</b> لقطة محفوظة داخل الإكستنشن</span>
-      <small>اختر أي لقطة للمعاينة أو تنزيل نسخة منها.</small>
-    </section>
+    <nav class="tabs" aria-label="أقسام الإكستنشن">
+      <button id="tab-run" class="tab active" type="button"><span>↗</span> تشغيل التقارير</button>
+      <button id="tab-library" class="tab" type="button"><span>▣</span> مكتبة اللقطات <b id="library-count">0</b></button>
+    </nav>
 
-    <section class="layout">
-      <aside class="snapshot-list-wrap" aria-label="قائمة اللقطات">
-        <div id="snapshot-list" class="snapshot-list"></div>
-      </aside>
-
-      <section class="preview-panel" aria-live="polite">
-        <div id="empty-preview" class="empty-preview">
-          <div class="empty-icon">▣</div>
-          <h2>لا توجد لقطة محددة</h2>
-          <p>بعد تشغيل التقرير ستظهر صور Performance وGenerative AI هنا تلقائيًا.</p>
-        </div>
-
-        <div id="snapshot-preview" class="snapshot-preview" hidden>
-          <div class="preview-meta">
-            <div>
-              <span id="preview-type" class="type-badge"></span>
-              <h2 id="preview-property"></h2>
-              <p id="preview-date"></p>
-            </div>
-            <div id="preview-change" class="metric-chip" hidden></div>
-          </div>
-          <div class="image-frame"><img id="preview-image" alt="لقطة تقرير Search Console"></div>
-          <div class="preview-actions">
-            <button id="export-snapshot" class="export-button" type="button">تنزيل نسخة PNG</button>
-            <button id="delete-snapshot" class="delete-button" type="button">حذف من المكتبة</button>
-          </div>
+    <section id="run-view" class="view">
+      <section class="current-property" aria-live="polite">
+        <div class="property-icon" aria-hidden="true">⌁</div>
+        <div>
+          <span class="eyebrow">الـ Property المفتوح الآن</span>
+          <strong id="current-property">جارٍ التحقق…</strong>
         </div>
       </section>
+
+      <section class="settings" aria-label="إعدادات التقرير">
+        <div class="section-label"><span>01</span> إعدادات التشغيل</div>
+        <label for="properties">المواقع المطلوب تشغيلها</label>
+        <textarea id="properties" rows="5" spellcheck="false" placeholder="اترك الحقل فارغًا للموقع المفتوح الآن&#10;أو أضف موقعًا في كل سطر، مثل:&#10;sc-domain:example.com&#10;https://www.example.com/"></textarea>
+        <div class="field-hint">استخدم الاستيراد لجلب كل الـ Properties المتاحة في حساب Search Console، ثم ستعمل المواقع واحدًا واحدًا بالترتيب.</div>
+        <button id="discover-properties" class="secondary" type="button"><span aria-hidden="true">↓</span> استيراد كل الخصائص من الحساب</button>
+
+        <div class="toggles">
+          <label class="check-row">
+            <input id="skip-declines" type="checkbox" checked>
+            <span class="fake-check"></span>
+            <span><b>فلترة ذكية للنقرات</b><small>تخطي الموقع إذا كانت النقرات أقل من الأسبوع السابق</small></span>
+          </label>
+          <label class="check-row">
+            <input id="include-generative" type="checkbox" checked>
+            <span class="fake-check"></span>
+            <span><bdi><b>Generative AI features</b></bdi><small>حفظ لقطة تقرير الذكاء الاصطناعي عند توفره</small></span>
+          </label>
+        </div>
+      </section>
+
+      <button id="start-run" class="primary" type="button"><span class="button-icon" aria-hidden="true">↗</span> بدء التقرير التلقائي</button>
+      <button id="cancel-run" class="danger hidden" type="button">إيقاف التشغيل</button>
+
+      <section id="run-panel" class="run-panel" aria-live="polite" hidden>
+        <div class="run-heading"><span id="run-indicator" class="indicator"></span><strong id="run-status">في الانتظار</strong></div>
+        <p id="run-detail" class="run-detail"></p>
+        <ol id="run-records" class="run-records"></ol>
+      </section>
+
+      <p id="run-message" class="run-message" aria-live="polite"></p>
+      <footer><span class="footer-dot"></span>اللقطات تحفظ تلقائيًا داخل الإكستنشن. افتح تبويب <b>مكتبة اللقطات</b> للمعاينة أو التنزيل.</footer>
+    </section>
+
+    <section id="library-view" class="view" hidden>
+      <section class="library-summary">
+        <div><span class="summary-dot"></span><b id="snapshot-count">0</b> لقطة محفوظة داخل الإكستنشن</div>
+        <button id="clear-library" class="clear-button" type="button">مسح الكل</button>
+        <small>اختر أي لقطة للمعاينة أو تنزيل نسخة PNG منها.</small>
+      </section>
+
+      <div class="library-layout">
+        <aside class="snapshot-list-wrap" aria-label="قائمة اللقطات"><div id="snapshot-list" class="snapshot-list"></div></aside>
+        <section class="preview-panel" aria-live="polite">
+          <div id="empty-preview" class="empty-preview">
+            <div class="empty-icon">▣</div>
+            <h2>لا توجد لقطة محددة</h2>
+            <p>بعد تشغيل التقرير ستظهر صور Performance وGenerative AI هنا تلقائيًا.</p>
+          </div>
+          <div id="snapshot-preview" class="snapshot-preview" hidden>
+            <div class="preview-meta">
+              <div>
+                <span id="preview-type" class="type-badge"></span>
+                <h2 id="preview-property"></h2>
+                <p id="preview-date"></p>
+              </div>
+              <div id="preview-change" class="metric-chip" hidden></div>
+            </div>
+            <div class="image-frame"><img id="preview-image" alt="لقطة تقرير Search Console"></div>
+            <div class="preview-actions">
+              <button id="export-snapshot" class="export-button" type="button">تنزيل PNG</button>
+              <button id="delete-snapshot" class="delete-button" type="button">حذف</button>
+            </div>
+          </div>
+        </section>
+      </div>
     </section>
   </main>
   <script src="sidepanel.js"></script>
